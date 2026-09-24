@@ -23,7 +23,8 @@ const KEYS = {
   classrooms:"sca_classrooms",
   timetable:"sca_timetable",
   notifications:"sca_notifications",
-  seeded:"sca_seeded_v1"
+  registeredUsers:"sca_registered_users",
+  seeded:"sca_seeded_v2"
 };
 
 /* ---------------- Small utils ---------------- */
@@ -92,44 +93,22 @@ function toggleTheme(){
 function seedData(){
   if(localStorage.getItem(KEYS.seeded)) return;
 
-  setData(KEYS.students, [
-    { id:uid(), name:"Aenose Joel", roll:"24101A0058", dept:"Information Technology", sem:"5", div:"A" },
-    { id:uid(), name:"Riya Sharma",  roll:"24101A0021", dept:"Computer Engineering",   sem:"5", div:"A" },
-    { id:uid(), name:"Karan Mehta",  roll:"24101A0037", dept:"Information Technology", sem:"5", div:"B" }
-  ]);
-
-  setData(KEYS.teachers, [
-    { id:uid(), name:"Dr. Sanjay Rao", subject:"Machine Learning", email:"sanjay.rao@college.edu" },
-    { id:uid(), name:"Prof. Neha Kulkarni", subject:"Database Systems", email:"neha.k@college.edu" },
-    { id:uid(), name:"Prof. Arvind Iyer", subject:"Operating Systems", email:"arvind.i@college.edu" }
-  ]);
-
+  // Only seed classrooms as physical starter data.
+  // Students, teachers, and timetable slots are created by real registrations.
   setData(KEYS.classrooms, [
-    { id:uid(), room:"Room 101", capacity:60, smartboard:true,  projector:true,  wifi:true,  ac:false, status:"Available" },
-    { id:uid(), room:"Room 102", capacity:60, smartboard:false, projector:true,  wifi:true,  ac:true,  status:"Occupied"  },
-    { id:uid(), room:"Room 203", capacity:50, smartboard:true,  projector:false, wifi:true,  ac:false, status:"Available" },
-    { id:uid(), room:"Lab A",    capacity:35, smartboard:true,  projector:true,  wifi:true,  ac:true,  status:"Available" },
-    { id:uid(), room:"Lab B",    capacity:35, smartboard:false, projector:true,  wifi:true,  ac:true,  status:"Occupied"  },
-    { id:uid(), room:"Seminar Hall", capacity:120, smartboard:true, projector:true, wifi:true, ac:true, status:"Available" }
+    { id:uid(), room:"Room 101",    capacity:60,  smartboard:true,  projector:true,  wifi:true, ac:false, status:"Available" },
+    { id:uid(), room:"Room 102",    capacity:60,  smartboard:false, projector:true,  wifi:true, ac:true,  status:"Available" },
+    { id:uid(), room:"Room 203",    capacity:50,  smartboard:true,  projector:false, wifi:true, ac:false, status:"Available" },
+    { id:uid(), room:"Lab A",       capacity:35,  smartboard:true,  projector:true,  wifi:true, ac:true,  status:"Available" },
+    { id:uid(), room:"Lab B",       capacity:35,  smartboard:false, projector:true,  wifi:true, ac:true,  status:"Available" },
+    { id:uid(), room:"Seminar Hall",capacity:120, smartboard:true,  projector:true,  wifi:true, ac:true,  status:"Available" }
   ]);
 
-  const teachers = getData(KEYS.teachers, []);
-  const rooms = getData(KEYS.classrooms, []).map(r=>r.room);
-  const timetable = [];
-  DAYS.forEach(day=>{
-    SLOTS.forEach((slot, i)=>{
-      if(Math.random() < 0.75){
-        timetable.push({
-          id:uid(), day, time:slot,
-          subject: SUBJECT_POOL[Math.floor(Math.random()*SUBJECT_POOL.length)],
-          teacher: teachers[Math.floor(Math.random()*teachers.length)].name,
-          room: rooms[Math.floor(Math.random()*rooms.length)],
-          sem:"5", div:"A"
-        });
-      }
-    });
-  });
-  setData(KEYS.timetable, timetable);
+  setData(KEYS.students, []);
+  setData(KEYS.teachers, []);
+  setData(KEYS.timetable, []);
+  setData(KEYS.registeredUsers, []);
+
   localStorage.setItem(KEYS.seeded, "1");
 }
 
@@ -159,6 +138,7 @@ function logout(){
   localStorage.removeItem(KEYS.username);
   localStorage.removeItem(KEYS.rollno);
   localStorage.removeItem(KEYS.role);
+  // Do NOT clear KEYS.seeded or classroom/timetable data — only the session
   window.location.href = "login.html";
 }
 
@@ -372,13 +352,12 @@ function renderTeachers(){
   const tbody = $("#teachersBody");
   if(!tbody) return;
   const teachers = getData(KEYS.teachers, []);
-  tbody.innerHTML = teachers.length ? "" : `<tr class="empty-row"><td colspan="4">No teachers added yet.</td></tr>`;
+  tbody.innerHTML = teachers.length ? "" : `<tr class="empty-row"><td colspan="3">No teachers registered yet. Teachers appear here automatically when they sign up.</td></tr>`;
   teachers.forEach(t=>{
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${t.name}</td>
-      <td>${t.subject}</td>
-      <td>${t.email || "—"}</td>
+      <td>${t.subject || "—"}</td>
       <td>
         <div class="row-actions">
           <button class="icon-btn" title="Edit" onclick="editTeacher('${t.id}')">✏️</button>
@@ -393,7 +372,6 @@ function renderTeachers(){
 function saveTeacher(){
   const name = $("#teacherName").value.trim();
   const subject = $("#teacherSubject").value.trim();
-  const email = $("#teacherEmail").value.trim();
 
   if(!/^[A-Za-z .]+$/.test(name) || name.length < 2){
     toast("Enter a valid teacher name.", "error");
@@ -407,12 +385,12 @@ function saveTeacher(){
   let teachers = getData(KEYS.teachers, []);
 
   if(editingTeacherId){
-    teachers = teachers.map(t => t.id === editingTeacherId ? { ...t, name, subject, email } : t);
+    teachers = teachers.map(t => t.id === editingTeacherId ? { ...t, name, subject } : t);
     toast("Teacher updated.", "success");
     editingTeacherId = null;
     $("#teacherSubmitBtn").textContent = "➕ Add Teacher";
   } else {
-    teachers.push({ id:uid(), name, subject, email });
+    teachers.push({ id:uid(), name, subject });
     toast("Teacher added.", "success");
   }
 
@@ -428,7 +406,6 @@ function editTeacher(id){
   editingTeacherId = id;
   $("#teacherName").value = t.name;
   $("#teacherSubject").value = t.subject;
-  $("#teacherEmail").value = t.email || "";
   $("#teacherSubmitBtn").textContent = "💾 Save Changes";
   $("#teacherName").scrollIntoView({ behavior:"smooth", block:"center" });
 }
@@ -442,7 +419,7 @@ function deleteTeacher(id){
 }
 
 function clearTeacherForm(){
-  ["teacherName","teacherSubject","teacherEmail"].forEach(id => { const el = $("#"+id); if(el) el.value = ""; });
+  ["teacherName","teacherSubject"].forEach(id => { const el = $("#"+id); if(el) el.value = ""; });
   editingTeacherId = null;
   if($("#teacherSubmitBtn")) $("#teacherSubmitBtn").textContent = "➕ Add Teacher";
 }
@@ -747,12 +724,14 @@ function populateAdminTimetableSelectors(){
   const roomSel = $("#ttRoom");
   if(!teacherSel || !roomSel) return;
 
-  const teachers = getData(KEYS.teachers, []);
+  // Only show teachers who actually registered through the registration page
+  const regUsers = getData(KEYS.registeredUsers, []);
+  const registeredTeachers = regUsers.filter(u => u.role === "teacher");
   const rooms = getData(KEYS.classrooms, []);
 
-  teacherSel.innerHTML = teachers.length
-    ? teachers.map(t => `<option value="${t.name}">${t.name}</option>`).join("")
-    : `<option value="">Add a teacher first</option>`;
+  teacherSel.innerHTML = registeredTeachers.length
+    ? registeredTeachers.map(t => `<option value="${t.name}">${t.name}</option>`).join("")
+    : `<option value="">No teachers registered yet</option>`;
 
   roomSel.innerHTML = rooms.length
     ? rooms.map(r => `<option value="${r.room}">${r.room}</option>`).join("")
@@ -1142,8 +1121,30 @@ function validateRegistration(){
     return false;
   }
 
-  // Registration succeeded — sign the new account in and send them to their dashboard.
-  localStorage.setItem(KEYS.username, `${fname} ${lname}`);
+  // Registration succeeded — save this user into the shared registry.
+  const fullName = `${fname} ${lname}`;
+  const regUsers = getData(KEYS.registeredUsers, []);
+  // Avoid duplicate entries for same name+role
+  const alreadyExists = regUsers.some(u => u.name === fullName && u.role === role);
+  if(!alreadyExists){
+    regUsers.push({ id:uid(), name:fullName, role, rollno: role === "student" ? rollno : "" });
+    setData(KEYS.registeredUsers, regUsers);
+
+    // Auto-add to the appropriate directory so Admin can see them immediately
+    if(role === "teacher"){
+      const teachers = getData(KEYS.teachers, []);
+      teachers.push({ id:uid(), name:fullName, subject:"—", email:"—" });
+      setData(KEYS.teachers, teachers);
+    }
+    if(role === "student"){
+      const students = getData(KEYS.students, []);
+      students.push({ id:uid(), name:fullName, roll:rollno, dept:"—", sem:"1", div:"A" });
+      setData(KEYS.students, students);
+    }
+  }
+
+  // Sign the new account in and send them to their dashboard.
+  localStorage.setItem(KEYS.username, fullName);
   localStorage.setItem(KEYS.rollno, role === "student" ? rollno : "");
   localStorage.setItem(KEYS.role, role);
 
@@ -1177,7 +1178,17 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   if(page === "login"){
-    // nothing extra to init
+    // If already logged in, go straight to the right dashboard
+    const existing = getCurrentUser();
+    if(existing){
+      if(existing.role === "admin") window.location.href = "admin.html";
+      else if(existing.role === "teacher") window.location.href = "teacher.html";
+      else window.location.href = "student.html";
+    }
+  }
+
+  if(page === "register"){
+    // nothing extra needed — form handles itself
   }
 
   if(page === "admin"){
