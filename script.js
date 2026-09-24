@@ -444,6 +444,30 @@ function clearTeacherForm(){
   if($("#teacherSubmitBtn")) $("#teacherSubmitBtn").textContent = "➕ Add Teacher";
 }
 
+/* ---------------- Read-only Classroom Status (Teacher & Student dashboards) ---------------- */
+
+function renderClassroomStatusReadOnly(containerId){
+  const wrap = $("#" + containerId);
+  if(!wrap) return;
+  const rooms = getData(KEYS.classrooms, []);
+
+  wrap.innerHTML = rooms.length ? "" : `<p class="muted">No classrooms have been added yet.</p>`;
+  rooms.forEach(r=>{
+    const div = document.createElement("div");
+    div.className = "card punched";
+    div.innerHTML = `
+      <h3>🏫 ${r.room} <span class="badge ${r.status==='Available'?'available':'occupied'}" style="margin-left:auto;">${r.status}</span></h3>
+      <p class="muted">Capacity: ${r.capacity} students</p>
+      <div class="tag-row">
+        <span class="badge ${r.smartboard?'on':'off'}">🖥️ Smart Board</span>
+        <span class="badge ${r.projector?'on':'off'}">📽️ Projector</span>
+        <span class="badge ${r.wifi?'on':'off'}">📶 WiFi</span>
+        <span class="badge ${r.ac?'on':'off'}">❄️ AC</span>
+      </div>`;
+    wrap.appendChild(div);
+  });
+}
+
 /* ---------------- Admin: Classrooms CRUD ---------------- */
 
 function renderClassrooms(){
@@ -1261,6 +1285,7 @@ document.addEventListener("DOMContentLoaded", () => {
       $("#profileName") && ($("#profileName").textContent = user.name);
       renderTeacherLectures();
       renderTeacherNotifications();
+      renderClassroomStatusReadOnly("teacherClassroomStatus");
     }
   }
 
@@ -1273,6 +1298,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     renderStudentTimetable();
     searchStudentTimetable();
+    renderClassroomStatusReadOnly("studentClassroomStatus");
   }
 
   if(page === "timetable"){
