@@ -223,6 +223,26 @@ function validateLogin(){
   localStorage.setItem(KEYS.rollno, role === "student" ? rollno : "");
   localStorage.setItem(KEYS.role, role);
 
+  // Keep admin-facing directories in sync even for users who sign in here
+  // instead of going through the Register page.
+  const regUsers = getData(KEYS.registeredUsers, []);
+  const alreadyExists = regUsers.some(u => u.name === name && u.role === role);
+  if(!alreadyExists){
+    regUsers.push({ id:uid(), name, role, rollno: role === "student" ? rollno : "" });
+    setData(KEYS.registeredUsers, regUsers);
+
+    if(role === "teacher"){
+      const teachers = getData(KEYS.teachers, []);
+      teachers.push({ id:uid(), name, subject:"—" });
+      setData(KEYS.teachers, teachers);
+    }
+    if(role === "student"){
+      const students = getData(KEYS.students, []);
+      students.push({ id:uid(), name, roll:rollno, dept:"—", sem:"1", div:"A" });
+      setData(KEYS.students, students);
+    }
+  }
+
   toast(`Welcome, ${name}!`, "success");
   setTimeout(()=>{
     if(role === "admin") window.location.href = "admin.html";
@@ -724,13 +744,21 @@ function populateAdminTimetableSelectors(){
   const roomSel = $("#ttRoom");
   if(!teacherSel || !roomSel) return;
 
-  // Only show teachers who actually registered through the registration page
+  // Show any teacher we know about: registered through the registration page,
+  // added manually to the directory, OR already appearing in the timetable
+  // (e.g. a teacher who signed in via Login and generated their own schedule).
   const regUsers = getData(KEYS.registeredUsers, []);
-  const registeredTeachers = regUsers.filter(u => u.role === "teacher");
+  const registeredNames = regUsers.filter(u => u.role === "teacher").map(u => u.name);
+  const directoryNames = getData(KEYS.teachers, []).map(t => t.name);
+  const timetableNames = getData(KEYS.timetable, []).map(t => t.teacher);
+
+  const teacherNames = Array.from(new Set([...registeredNames, ...directoryNames, ...timetableNames]))
+    .filter(Boolean);
+
   const rooms = getData(KEYS.classrooms, []);
 
-  teacherSel.innerHTML = registeredTeachers.length
-    ? registeredTeachers.map(t => `<option value="${t.name}">${t.name}</option>`).join("")
+  teacherSel.innerHTML = teacherNames.length
+    ? teacherNames.map(n => `<option value="${n}">${n}</option>`).join("")
     : `<option value="">No teachers registered yet</option>`;
 
   roomSel.innerHTML = rooms.length
