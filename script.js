@@ -1175,6 +1175,29 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if(page === "home"){
     renderMiniTimetable();
+
+    const user = getCurrentUser();
+    const bell = $("#notifBell");
+    const dot = $("#notifDot");
+    const dashBtn = $("#dashboardBtn");
+
+    if(user){
+      // Show dashboard shortcut for any logged-in user
+      if(dashBtn){
+        dashBtn.style.display = "inline-flex";
+        const href = user.role === "admin" ? "admin.html"
+                   : user.role === "teacher" ? "teacher.html"
+                   : "student.html";
+        dashBtn.setAttribute("href", href);
+      }
+
+      // Show notification bell only for teachers (they receive timetable change alerts)
+      if(bell && user.role === "teacher"){
+        bell.style.display = "inline-flex";
+        const unread = getAllNotifications().filter(n => n.teacher === user.name && !n.read).length;
+        if(dot) dot.style.display = unread > 0 ? "block" : "none";
+      }
+    }
   }
 
   if(page === "login"){

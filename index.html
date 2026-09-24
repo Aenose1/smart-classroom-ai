@@ -22,6 +22,13 @@
     </nav>
     <div style="display:flex; align-items:center; gap:10px;">
       <span id="userChip" class="user-chip" style="display:none;"></span>
+      <a id="notifBell" href="notifications.html" title="Notification Log" style="display:none; position:relative; text-decoration:none;">
+        <button class="theme-toggle" style="font-size:1.1rem;">🔔</button>
+        <span id="notifDot" style="display:none; position:absolute; top:4px; right:4px; width:9px; height:9px; border-radius:50%; background:var(--accent-3); border:2px solid var(--surface);"></span>
+      </a>
+      <a id="dashboardBtn" href="#" title="Go to my dashboard" style="display:none;">
+        <button class="btn sm">My Dashboard</button>
+      </a>
       <button id="themeToggle" class="theme-toggle" title="Toggle dark mode">🌙</button>
     </div>
   </div>
