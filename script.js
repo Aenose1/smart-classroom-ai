@@ -1,11 +1,29 @@
 /* =========================================================
    Smart Classroom & AI Timetable Scheduler — script.js
-   Vanilla JS. No backend. All state in localStorage.
+   Vanilla JS + Supabase backend (PostgreSQL).
+   localStorage used ONLY for theme + display session cache.
    ========================================================= */
+
+/* ---------------- Supabase Init ---------------- */
+
+const SUPABASE_URL = "https://vbhrbdnhpzvzrrjfwjub.supabase.co";
+const SUPABASE_KEY = "sb_publishable_A267AUsJwboPuzPC8I86fw_dBvIWbaB";
+
+let _sb = null;
+function sb(){
+  if(!_sb){
+    if(typeof supabase === "undefined" || !supabase.createClient){
+      console.error("Supabase JS library not loaded.");
+      return null;
+    }
+    _sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  }
+  return _sb;
+}
 
 /* ---------------- Constants ---------------- */
 
-const DAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday"];
+const DAYS  = ["Monday","Tuesday","Wednesday","Thursday","Friday"];
 const SLOTS = ["09:00 - 10:00","10:00 - 11:00","11:15 - 12:15","01:00 - 02:00","02:00 - 03:00"];
 const SUBJECT_POOL = [
   "Machine Learning","Python Programming","Java","Database Systems",
@@ -14,17 +32,11 @@ const SUBJECT_POOL = [
 ];
 
 const KEYS = {
-  theme:"sca_theme",
+  theme:   "sca_theme",
   username:"username",
-  rollno:"rollno",
-  role:"role",
-  students:"sca_students",
-  teachers:"sca_teachers",
-  classrooms:"sca_classrooms",
-  timetable:"sca_timetable",
-  notifications:"sca_notifications",
-  registeredUsers:"sca_registered_users",
-  seeded:"sca_seeded_v2"
+  rollno:  "rollno",
+  role:    "role",
+  email:   "sca_email"
 };
 
 /* ---------------- Small utils ---------------- */
@@ -34,18 +46,10 @@ const $$ = (sel, ctx=document) => Array.from(ctx.querySelectorAll(sel));
 
 function uid(){ return Math.random().toString(36).slice(2,9); }
 
-function getData(key, fallback){
-  try{
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  }catch(e){ return fallback; }
-}
-function setData(key, val){ localStorage.setItem(key, JSON.stringify(val)); }
-
 function todayName(){
-  const d = new Date().getDay(); // 0 Sun ... 6 Sat
+  const d = new Date().getDay();
   const map = {1:"Monday",2:"Tuesday",3:"Wednesday",4:"Thursday",5:"Friday"};
-  return map[d] || "Monday"; // weekend falls back to Monday for demo purposes
+  return map[d] || "Monday";
 }
 
 /* ---------------- Toasts ---------------- */
@@ -80,39 +84,15 @@ function initTheme(){
 }
 
 function toggleTheme(){
-  const current = document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
-  const next = current === "dark" ? "light" : "dark";
+  const cur = document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+  const next = cur === "dark" ? "light" : "dark";
   document.documentElement.setAttribute("data-theme", next);
   localStorage.setItem(KEYS.theme, next);
   const btn = $("#themeToggle");
   if(btn) btn.textContent = next === "dark" ? "☀️" : "🌙";
 }
 
-/* ---------------- Seed demo data ---------------- */
-
-function seedData(){
-  if(localStorage.getItem(KEYS.seeded)) return;
-
-  // Only seed classrooms as physical starter data.
-  // Students, teachers, and timetable slots are created by real registrations.
-  setData(KEYS.classrooms, [
-    { id:uid(), room:"Room 101",    capacity:60,  smartboard:true,  projector:true,  wifi:true, ac:false, status:"Available" },
-    { id:uid(), room:"Room 102",    capacity:60,  smartboard:false, projector:true,  wifi:true, ac:true,  status:"Available" },
-    { id:uid(), room:"Room 203",    capacity:50,  smartboard:true,  projector:false, wifi:true, ac:false, status:"Available" },
-    { id:uid(), room:"Lab A",       capacity:35,  smartboard:true,  projector:true,  wifi:true, ac:true,  status:"Available" },
-    { id:uid(), room:"Lab B",       capacity:35,  smartboard:false, projector:true,  wifi:true, ac:true,  status:"Available" },
-    { id:uid(), room:"Seminar Hall",capacity:120, smartboard:true,  projector:true,  wifi:true, ac:true,  status:"Available" }
-  ]);
-
-  setData(KEYS.students, []);
-  setData(KEYS.teachers, []);
-  setData(KEYS.timetable, []);
-  setData(KEYS.registeredUsers, []);
-
-  localStorage.setItem(KEYS.seeded, "1");
-}
-
-/* ---------------- Auth ---------------- */
+/* ---------------- Auth session (localStorage display cache) ---------------- */
 
 function getCurrentUser(){
   const name = localStorage.getItem(KEYS.username);
@@ -121,25 +101,20 @@ function getCurrentUser(){
   return {
     name,
     role,
+    email:  localStorage.getItem(KEYS.email)  || "",
     rollno: localStorage.getItem(KEYS.rollno) || ""
   };
 }
 
-function requireAuth(allowedRoles){
-  const user = getCurrentUser();
-  if(!user || !allowedRoles.includes(user.role)){
-    window.location.href = "login.html";
-    return null;
-  }
-  return user;
+function setCurrentUser(name, role, email, rollno=""){
+  localStorage.setItem(KEYS.username, name);
+  localStorage.setItem(KEYS.role, role);
+  localStorage.setItem(KEYS.email, email || "");
+  localStorage.setItem(KEYS.rollno, rollno);
 }
 
-function logout(){
-  localStorage.removeItem(KEYS.username);
-  localStorage.removeItem(KEYS.rollno);
-  localStorage.removeItem(KEYS.role);
-  // Do NOT clear KEYS.seeded or classroom/timetable data — only the session
-  window.location.href = "login.html";
+function clearCurrentUser(){
+  [KEYS.username, KEYS.role, KEYS.email, KEYS.rollno].forEach(k => localStorage.removeItem(k));
 }
 
 function capitalize(str){
@@ -159,145 +134,655 @@ function renderUserChip(){
   }
 }
 
-/* ---------------- Login validation ---------------- */
+/* ---------------- requireAuth (uses Supabase session + local cache) ---------------- */
+
+async function requireAuth(allowedRoles){
+  const client = sb();
+  if(client){
+    const { data:{ session } } = await client.auth.getSession();
+    if(!session){
+      clearCurrentUser();
+      window.location.href = "login.html";
+      return null;
+    }
+    const meta = session.user.user_metadata || {};
+    const role = meta.role || localStorage.getItem(KEYS.role);
+    if(!allowedRoles.includes(role)){
+      window.location.href = "login.html";
+      return null;
+    }
+    // Refresh local display cache from Supabase session
+    const name = meta.full_name || localStorage.getItem(KEYS.username) || session.user.email;
+    setCurrentUser(name, role, session.user.email, meta.rollno || "");
+    return getCurrentUser();
+  }
+  // Fallback: Supabase not available — use local cache
+  const user = getCurrentUser();
+  if(!user || !allowedRoles.includes(user.role)){
+    window.location.href = "login.html";
+    return null;
+  }
+  return user;
+}
+
+/* ---------------- Logout ---------------- */
+
+async function logout(){
+  const client = sb();
+  if(client){
+    await client.auth.signOut().catch(()=>{});
+  }
+  clearCurrentUser();
+  window.location.href = "login.html";
+}
+
+/* ---------------- Login form validation + Supabase sign-in ---------------- */
 
 function markField(fieldEl, invalid, message){
+  if(!fieldEl) return;
   const errEl = fieldEl.querySelector(".error");
   fieldEl.classList.toggle("invalid", invalid);
   if(errEl && message) errEl.textContent = message;
 }
 
 function handleRoleChange(){
-  const role = $("#role").value;
+  const roleEl = $("#role");
+  if(!roleEl) return;
+  const role = roleEl.value;
   const rollnoField = $("#rollnoField");
   if(rollnoField) rollnoField.style.display = role === "student" ? "block" : "none";
   if(role !== "student" && rollnoField){
-    markField(rollnoField, false);
-    $("#rollno").value = "";
+    const rollnoFieldEl = $("#rollnoField");
+    if(rollnoFieldEl) markField(rollnoFieldEl, false);
+    const rollnoInput = $("#rollno");
+    if(rollnoInput) rollnoInput.value = "";
   }
   $$(".role-pick button").forEach(b => b.classList.toggle("active", b.dataset.role === role));
 }
 
-function validateLogin(){
+function selectRole(role){
+  const roleEl = $("#role");
+  if(roleEl) roleEl.value = role;
+  handleRoleChange();
   const roleField = $("#roleField");
-  const nameField = $("#nameField");
-  const rollnoField = $("#rollnoField");
-  const passField = $("#passField");
+  if(roleField) markField(roleField, false);
+}
 
-  const role = $("#role").value;
-  const name = $("#name").value.trim();
-  const rollno = $("#rollno").value.trim();
-  const password = $("#password").value;
+async function validateLogin(){
+  const roleField   = $("#roleField");
+  const nameField   = $("#nameField");
+  const rollnoField = $("#rollnoField");
+  const passField   = $("#passField");
+
+  const role     = ($("#role") || {value:""}).value;
+  const name     = (($("#name") || {value:""}).value).trim();
+  const rollno   = (($("#rollno") || {value:""}).value).trim();
+  const password = (($("#password") || {value:""}).value);
+
+  // If the page uses email-based login (Supabase style) use #email instead of #name
+  const emailInput = $("#email");
+  const email      = emailInput ? emailInput.value.trim() : "";
 
   const namePattern = /^[A-Za-z ]+$/;
   let ok = true;
 
-  if(role === ""){
-    markField(roleField, true, "Please select a user type.");
-    ok = false;
-  } else markField(roleField, false);
+  if(roleField){
+    if(role === ""){
+      markField(roleField, true, "Please select a user type.");
+      ok = false;
+    } else markField(roleField, false);
+  }
 
-  if(!namePattern.test(name) || name.length < 2){
-    markField(nameField, true, "Name should contain only alphabets and be at least 2 characters.");
-    ok = false;
-  } else markField(nameField, false);
+  // If using email login, validate email; else validate name
+  if(emailInput){
+    const emailPattern = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
+    if(!emailPattern.test(email)){
+      if(nameField) markField(nameField, true, "Enter a valid email address.");
+      ok = false;
+    } else if(nameField) markField(nameField, false);
+  } else if(nameField){
+    if(!namePattern.test(name) || name.length < 2){
+      markField(nameField, true, "Name should contain only alphabets and be at least 2 characters.");
+      ok = false;
+    } else markField(nameField, false);
+  }
 
-  if(role === "student"){
+  if(role === "student" && rollnoField){
     if(rollno === ""){
       markField(rollnoField, true, "Roll number cannot be empty.");
       ok = false;
     } else markField(rollnoField, false);
   }
 
-  if(password.length < 6){
-    markField(passField, true, "Password must be at least 6 characters.");
-    ok = false;
-  } else markField(passField, false);
+  if(passField){
+    if(password.length < 6){
+      markField(passField, true, "Password must be at least 6 characters.");
+      ok = false;
+    } else markField(passField, false);
+  }
 
   if(!ok){
     toast("Please fix the highlighted fields.", "error");
     return false;
   }
 
-  localStorage.setItem(KEYS.username, name);
-  localStorage.setItem(KEYS.rollno, role === "student" ? rollno : "");
-  localStorage.setItem(KEYS.role, role);
-
-  // Keep admin-facing directories in sync even for users who sign in here
-  // instead of going through the Register page.
-  const regUsers = getData(KEYS.registeredUsers, []);
-  const alreadyExists = regUsers.some(u => u.name === name && u.role === role);
-  if(!alreadyExists){
-    regUsers.push({ id:uid(), name, role, rollno: role === "student" ? rollno : "" });
-    setData(KEYS.registeredUsers, regUsers);
-
-    if(role === "teacher"){
-      const teachers = getData(KEYS.teachers, []);
-      teachers.push({ id:uid(), name, subject:"—" });
-      setData(KEYS.teachers, teachers);
+  // --- Supabase login ---
+  const client = sb();
+  if(client && email){
+    toast("Signing in…", "info");
+    const { data, error } = await client.auth.signInWithPassword({ email, password });
+    if(error){
+      toast("Login failed: " + error.message, "error");
+      return false;
     }
-    if(role === "student"){
-      const students = getData(KEYS.students, []);
-      students.push({ id:uid(), name, roll:rollno, dept:"—", sem:"1", div:"A" });
-      setData(KEYS.students, students);
-    }
+    const meta      = data.user.user_metadata || {};
+    const userRole  = meta.role || role || "student";
+    const userName  = meta.full_name || name || email;
+    const userRoll  = meta.rollno   || rollno || "";
+    setCurrentUser(userName, userRole, email, userRoll);
+    toast(`Welcome, ${userName}!`, "success");
+    setTimeout(()=>{
+      if(userRole === "admin")   window.location.href = "admin.html";
+      else if(userRole === "teacher") window.location.href = "teacher.html";
+      else                            window.location.href = "student.html";
+    }, 500);
+    return false;
+  }
+
+  // --- Fallback: name-only localStorage login (original behaviour) ---
+  setCurrentUser(name, role, "", rollno);
+
+  // Keep teacher/student directories in sync
+  if(role === "teacher"){
+    const teachers = await fetchTeachers();
+    const exists   = teachers.find(t => t.name === name);
+    if(!exists) await dbInsertTeacher({ name, subject:"—" });
+  }
+  if(role === "student"){
+    const students = await fetchStudents();
+    const exists   = students.find(s => s.name === name);
+    if(!exists) await dbInsertStudent({ name, roll_no:rollno, dept:"—", sem:"1", div:"A" });
   }
 
   toast(`Welcome, ${name}!`, "success");
   setTimeout(()=>{
-    if(role === "admin") window.location.href = "admin.html";
+    if(role === "admin")   window.location.href = "admin.html";
     else if(role === "teacher") window.location.href = "teacher.html";
-    else window.location.href = "student.html";
+    else                        window.location.href = "student.html";
   }, 500);
-
   return false;
 }
 
-function selectRole(role){
-  $("#role").value = role;
-  handleRoleChange();
-  markField($("#roleField"), false);
+/* ---------------- Registration form + Supabase sign-up ---------------- */
+
+function regHandleRoleChange(){
+  const regRoleEl = $("#regRole");
+  if(!regRoleEl) return;
+  const role = regRoleEl.value;
+  const rollnoField = $("#regRollnoField");
+  if(rollnoField) rollnoField.style.display = role === "student" ? "block" : "none";
+  if(role !== "student" && rollnoField){
+    markField(rollnoField, false);
+    const ri = $("#regRollno"); if(ri) ri.value = "";
+  }
+  $$(".role-pick button").forEach(b => b.classList.toggle("active", b.dataset.role === role));
 }
 
-/* ---------------- Dashboard stats ---------------- */
+function regSelectRole(role){
+  const el = $("#regRole"); if(el) el.value = role;
+  regHandleRoleChange();
+  const rf = $("#regRoleField"); if(rf) markField(rf, false);
+}
+
+async function validateRegistration(){
+  const roleField    = $("#regRoleField");
+  const fnameField   = $("#fnameField");
+  const lnameField   = $("#lnameField");
+  const rollnoField  = $("#regRollnoField");
+  const passField    = $("#regPassField");
+  const emailField   = $("#regEmailField");
+  const mobileField  = $("#mobileField");
+  const addressField = $("#addressField");
+
+  const role     = ($("#regRole")     ||{value:""}).value;
+  const fname    = (($("#fname")      ||{value:""}).value).trim();
+  const lname    = (($("#lname")      ||{value:""}).value).trim();
+  const rollno   = (($("#regRollno")  ||{value:""}).value).trim();
+  const password = (($("#regPassword")||{value:""}).value);
+  const email    = (($("#regEmail")   ||{value:""}).value).trim();
+  const mobile   = (($("#mobile")     ||{value:""}).value).trim();
+  const address  = (($("#address")    ||{value:""}).value).trim();
+
+  const namePattern  = /^[A-Za-z]+$/;
+  const emailPattern = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
+  const mobilePattern= /^[0-9]{10}$/;
+  let ok = true;
+
+  if(roleField){
+    if(role === ""){ markField(roleField, true); ok = false; }
+    else markField(roleField, false);
+  }
+  if(fnameField){
+    if(!namePattern.test(fname) || fname.length < 2){ markField(fnameField, true); ok = false; }
+    else markField(fnameField, false);
+  }
+  if(lnameField){
+    if(lname === ""){ markField(lnameField, true); ok = false; }
+    else markField(lnameField, false);
+  }
+  if(role === "student" && rollnoField){
+    if(rollno === ""){ markField(rollnoField, true); ok = false; }
+    else markField(rollnoField, false);
+  }
+  if(passField){
+    if(password.length < 6){ markField(passField, true); ok = false; }
+    else markField(passField, false);
+  }
+  if(emailField){
+    if(!emailPattern.test(email)){ markField(emailField, true); ok = false; }
+    else markField(emailField, false);
+  }
+  if(mobileField){
+    if(!mobilePattern.test(mobile)){ markField(mobileField, true); ok = false; }
+    else markField(mobileField, false);
+  }
+  if(addressField){
+    if(address === ""){ markField(addressField, true); ok = false; }
+    else markField(addressField, false);
+  }
+
+  if(!ok){
+    toast("Please fix the highlighted fields.", "error");
+    return false;
+  }
+
+  const fullName = `${fname} ${lname}`;
+  const client   = sb();
+
+  if(client){
+    toast("Creating your account…", "info");
+    const { data, error } = await client.auth.signUp({
+      email,
+      password,
+      options:{
+        data:{
+          full_name: fullName,
+          role,
+          rollno:  role === "student" ? rollno : "",
+          mobile,
+          address
+        }
+      }
+    });
+
+    if(error){
+      toast("Registration failed: " + error.message, "error");
+      return false;
+    }
+
+    // Insert into the right Supabase table
+    if(role === "teacher"){
+      const existing = await fetchTeachers();
+      if(!existing.find(t => t.name === fullName)){
+        await dbInsertTeacher({ name:fullName, subject:"—", email });
+      }
+    }
+    if(role === "student"){
+      const existing = await fetchStudents();
+      if(!existing.find(s => s.roll_no === rollno)){
+        await dbInsertStudent({ name:fullName, roll_no:rollno, dept:"—", sem:"1", div:"A" });
+      }
+    }
+
+    setCurrentUser(fullName, role, email, role === "student" ? rollno : "");
+    toast("🎉 Registration Successful!", "success");
+    const formEl = $("#registrationForm"); if(formEl) formEl.reset();
+    setTimeout(()=>{
+      if(role === "admin")   window.location.href = "admin.html";
+      else if(role === "teacher") window.location.href = "teacher.html";
+      else                        window.location.href = "student.html";
+    }, 700);
+    return false;
+  }
+
+  // Fallback: no Supabase — pure localStorage
+  setCurrentUser(fullName, role, email, role === "student" ? rollno : "");
+  if(role === "teacher") await dbInsertTeacher({ name:fullName, subject:"—" });
+  if(role === "student") await dbInsertStudent({ name:fullName, roll_no:rollno, dept:"—", sem:"1", div:"A" });
+
+  toast("🎉 Registration Successful!", "success");
+  const formEl = $("#registrationForm"); if(formEl) formEl.reset();
+  setTimeout(()=>{
+    if(role === "admin")   window.location.href = "admin.html";
+    else if(role === "teacher") window.location.href = "teacher.html";
+    else                        window.location.href = "student.html";
+  }, 700);
+  return false;
+}
+
+/* ================================================================
+   SUPABASE DATABASE HELPERS
+   All CRUD goes through these. Each returns an array or object.
+   On error: shows toast and returns empty array / null.
+   ================================================================ */
+
+/* ---------- Students ---------- */
+
+async function fetchStudents(){
+  const client = sb(); if(!client) return [];
+  const { data, error } = await client.from("students").select("*").order("created_at", {ascending:true});
+  if(error){ console.error("fetchStudents:", error); return []; }
+  return data || [];
+}
+
+async function dbInsertStudent(s){
+  const client = sb(); if(!client) return null;
+  const { data, error } = await client.from("students").insert([{
+    name:   s.name,
+    roll_no:s.roll_no || s.roll || "",
+    dept:   s.dept   || "—",
+    sem:    String(s.sem || "1"),
+    div:    s.div    || "A"
+  }]).select().single();
+  if(error){ toast("DB error (student insert): " + error.message, "error"); return null; }
+  return data;
+}
+
+async function dbUpdateStudent(id, s){
+  const client = sb(); if(!client) return false;
+  const { error } = await client.from("students").update({
+    name:   s.name,
+    roll_no:s.roll_no || s.roll || "",
+    dept:   s.dept   || "—",
+    sem:    String(s.sem || "1"),
+    div:    s.div    || "A"
+  }).eq("id", id);
+  if(error){ toast("DB error (student update): " + error.message, "error"); return false; }
+  return true;
+}
+
+async function dbDeleteStudent(id){
+  const client = sb(); if(!client) return false;
+  const { error } = await client.from("students").delete().eq("id", id);
+  if(error){ toast("DB error (student delete): " + error.message, "error"); return false; }
+  return true;
+}
+
+/* ---------- Teachers ---------- */
+
+async function fetchTeachers(){
+  const client = sb(); if(!client) return [];
+  const { data, error } = await client.from("teachers").select("*").order("created_at", {ascending:true});
+  if(error){ console.error("fetchTeachers:", error); return []; }
+  return data || [];
+}
+
+async function dbInsertTeacher(t){
+  const client = sb(); if(!client) return null;
+  const { data, error } = await client.from("teachers").insert([{
+    name:    t.name,
+    subject: t.subject || "—",
+    email:   t.email   || "—"
+  }]).select().single();
+  if(error){ toast("DB error (teacher insert): " + error.message, "error"); return null; }
+  return data;
+}
+
+async function dbUpdateTeacher(id, t){
+  const client = sb(); if(!client) return false;
+  const { error } = await client.from("teachers").update({
+    name:    t.name,
+    subject: t.subject || "—",
+    email:   t.email   || "—"
+  }).eq("id", id);
+  if(error){ toast("DB error (teacher update): " + error.message, "error"); return false; }
+  return true;
+}
+
+async function dbDeleteTeacher(id){
+  const client = sb(); if(!client) return false;
+  const { error } = await client.from("teachers").delete().eq("id", id);
+  if(error){ toast("DB error (teacher delete): " + error.message, "error"); return false; }
+  return true;
+}
+
+/* ---------- Classrooms ---------- */
+
+async function fetchClassrooms(){
+  const client = sb(); if(!client) return [];
+  const { data, error } = await client.from("classrooms").select("*").order("created_at", {ascending:true});
+  if(error){ console.error("fetchClassrooms:", error); return []; }
+  return data || [];
+}
+
+async function dbInsertClassroom(r){
+  const client = sb(); if(!client) return null;
+  const { data, error } = await client.from("classrooms").insert([{
+    room:       r.room,
+    capacity:   Number(r.capacity),
+    smartboard: Boolean(r.smartboard),
+    projector:  Boolean(r.projector),
+    wifi:       Boolean(r.wifi),
+    ac:         Boolean(r.ac),
+    status:     r.status || "Available"
+  }]).select().single();
+  if(error){ toast("DB error (classroom insert): " + error.message, "error"); return null; }
+  return data;
+}
+
+async function dbUpdateClassroom(id, r){
+  const client = sb(); if(!client) return false;
+  const { error } = await client.from("classrooms").update({
+    room:       r.room,
+    capacity:   Number(r.capacity),
+    smartboard: Boolean(r.smartboard),
+    projector:  Boolean(r.projector),
+    wifi:       Boolean(r.wifi),
+    ac:         Boolean(r.ac),
+    status:     r.status || "Available"
+  }).eq("id", id);
+  if(error){ toast("DB error (classroom update): " + error.message, "error"); return false; }
+  return true;
+}
+
+async function dbDeleteClassroom(id){
+  const client = sb(); if(!client) return false;
+  const { error } = await client.from("classrooms").delete().eq("id", id);
+  if(error){ toast("DB error (classroom delete): " + error.message, "error"); return false; }
+  return true;
+}
+
+/* ---------- Timetable ---------- */
+
+async function fetchTimetable(){
+  const client = sb(); if(!client) return [];
+  const { data, error } = await client.from("timetable").select("*").order("created_at", {ascending:true});
+  if(error){ console.error("fetchTimetable:", error); return []; }
+  return data || [];
+}
+
+async function dbInsertTimetable(entry){
+  const client = sb(); if(!client) return null;
+  const { data, error } = await client.from("timetable").insert([{
+    day:     entry.day,
+    time:    entry.time,
+    subject: entry.subject,
+    teacher: entry.teacher,
+    room:    entry.room,
+    sem:     String(entry.sem || "5"),
+    div:     entry.div || "A"
+  }]).select().single();
+  if(error){ toast("DB error (timetable insert): " + error.message, "error"); return null; }
+  return data;
+}
+
+async function dbUpdateTimetable(id, entry){
+  const client = sb(); if(!client) return false;
+  const { error } = await client.from("timetable").update({
+    day:     entry.day,
+    time:    entry.time,
+    subject: entry.subject,
+    teacher: entry.teacher,
+    room:    entry.room,
+    sem:     String(entry.sem || "5"),
+    div:     entry.div || "A"
+  }).eq("id", id);
+  if(error){ toast("DB error (timetable update): " + error.message, "error"); return false; }
+  return true;
+}
+
+async function dbDeleteTimetable(id){
+  const client = sb(); if(!client) return false;
+  const { error } = await client.from("timetable").delete().eq("id", id);
+  if(error){ toast("DB error (timetable delete): " + error.message, "error"); return false; }
+  return true;
+}
+
+/* ---------- Notifications ---------- */
+
+async function fetchNotifications(teacherName){
+  const client = sb(); if(!client) return [];
+  let q = client.from("notifications").select("*").order("created_at", {ascending:false});
+  if(teacherName) q = q.eq("teacher", teacherName);
+  const { data, error } = await q;
+  if(error){ console.error("fetchNotifications:", error); return []; }
+  return data || [];
+}
+
+async function dbInsertNotification(teacherName, message){
+  const client = sb(); if(!client) return null;
+  const { data, error } = await client.from("notifications").insert([{
+    teacher: teacherName,
+    message,
+    read:    false
+  }]).select().single();
+  if(error){ console.error("dbInsertNotification:", error); return null; }
+  return data;
+}
+
+async function dbMarkNotificationsRead(teacherName){
+  const client = sb(); if(!client) return false;
+  const { error } = await client.from("notifications")
+    .update({ read: true })
+    .eq("teacher", teacherName)
+    .eq("read", false);
+  if(error){ console.error("dbMarkNotificationsRead:", error); return false; }
+  return true;
+}
+
+async function dbDeleteNotifications(teacherName){
+  const client = sb(); if(!client) return false;
+  const { error } = await client.from("notifications").delete().eq("teacher", teacherName);
+  if(error){ console.error("dbDeleteNotifications:", error); return false; }
+  return true;
+}
+
+/* ================================================================
+   IN-MEMORY STATE (loaded from Supabase on dashboard init,
+   used for conflict checks and local renders without re-fetching)
+   ================================================================ */
+
+let _students   = [];
+let _teachers   = [];
+let _classrooms = [];
+let _timetable  = [];
+let _notifications = [];
+
+async function loadAllData(){
+  [_students, _teachers, _classrooms, _timetable] = await Promise.all([
+    fetchStudents(), fetchTeachers(), fetchClassrooms(), fetchTimetable()
+  ]);
+}
+
+/* ================================================================
+   NOTIFICATIONS (push + render)
+   ================================================================ */
+
+async function pushNotification(teacherName, message){
+  await dbInsertNotification(teacherName, message);
+  const user = getCurrentUser();
+  if(user && user.name === teacherName){
+    _notifications = await fetchNotifications(teacherName);
+    renderTeacherNotifications();
+  }
+}
+
+async function markNotificationsRead(){
+  const user = getCurrentUser();
+  if(!user) return;
+  await dbMarkNotificationsRead(user.name);
+  _notifications = _notifications.map(n => ({...n, read:true}));
+  renderTeacherNotifications();
+  toast("Notifications cleared.", "info");
+}
+
+/* Used by notifications.html page */
+function getAllNotifications(){ return _notifications; }
+
+function renderTeacherNotifications(){
+  const list  = $("#notificationsList");
+  if(!list) return;
+  const user  = getCurrentUser();
+  if(!user) return;
+  const mine  = _notifications.filter(n => n.teacher === user.name);
+  const unread= mine.filter(n => !n.read).length;
+
+  const badgeEl = $("#unreadBadge");
+  if(badgeEl){
+    badgeEl.style.display = unread ? "inline-flex" : "none";
+    badgeEl.textContent   = `${unread} new`;
+  }
+
+  list.innerHTML = mine.length
+    ? ""
+    : `<p class="muted">No notifications yet. You'll see a message here if an admin changes one of your lectures.</p>`;
+
+  mine.forEach(n=>{
+    const div = document.createElement("div");
+    div.className = "notice";
+    if(!n.read) div.style.borderLeftColor = "var(--accent-3)";
+    const when = new Date(n.created_at || Date.now()).toLocaleString();
+    div.innerHTML = `${n.read ? "" : "<b>● New —</b> "}${n.message} <div class="muted" style="margin-top:4px;">${when}</div>`;
+    list.appendChild(div);
+  });
+}
+
+/* ================================================================
+   DASHBOARD STATS
+   ================================================================ */
 
 function renderDashboardStats(){
-  const students = getData(KEYS.students, []);
-  const teachers = getData(KEYS.teachers, []);
-  const classrooms = getData(KEYS.classrooms, []);
-  const timetable = getData(KEYS.timetable, []);
-
-  const todayCount = timetable.filter(t => t.day === todayName()).length;
-
+  const today = todayName();
   const setStat = (id, val) => { const el = $(id); if(el) el.textContent = val; };
-  setStat("#statStudents", students.length);
-  setStat("#statTeachers", teachers.length);
-  setStat("#statClassrooms", classrooms.length);
-  setStat("#statToday", todayCount);
+  setStat("#statStudents",  _students.length);
+  setStat("#statTeachers",  _teachers.length);
+  setStat("#statClassrooms",_classrooms.length);
+  setStat("#statToday",     _timetable.filter(t => t.day === today).length);
 }
 
-/* ---------------- Admin: Students CRUD ---------------- */
+/* ================================================================
+   ADMIN: STUDENTS CRUD
+   ================================================================ */
 
 let editingStudentId = null;
-let editingTeacherId = null;
-let editingRoomId = null;
 
 function renderStudents(){
   const tbody = $("#studentsBody");
   if(!tbody) return;
-  const students = getData(KEYS.students, []);
-  tbody.innerHTML = students.length ? "" : `<tr class="empty-row"><td colspan="6">No students added yet.</td></tr>`;
-  students.forEach(s=>{
+  tbody.innerHTML = _students.length
+    ? ""
+    : `<tr class="empty-row"><td colspan="6">No students added yet.</td></tr>`;
+  _students.forEach(s=>{
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${s.name}</td>
-      <td>${s.roll}</td>
-      <td>${s.dept}</td>
-      <td>${s.sem}</td>
-      <td>${s.div}</td>
+      <td>${s.roll_no || s.roll || ""}</td>
+      <td>${s.dept || "—"}</td>
+      <td>${s.sem  || "—"}</td>
+      <td>${s.div  || "—"}</td>
       <td>
         <div class="row-actions">
-          <button class="icon-btn" title="Edit" onclick="editStudent('${s.id}')">✏️</button>
+          <button class="icon-btn" title="Edit"   onclick="editStudent('${s.id}')">✏️</button>
           <button class="icon-btn del" title="Delete" onclick="deleteStudent('${s.id}')">🗑️</button>
         </div>
       </td>`;
@@ -305,12 +790,12 @@ function renderStudents(){
   });
 }
 
-function saveStudent(){
-  const name = $("#studentName").value.trim();
-  const roll = $("#studentRoll").value.trim();
-  const dept = $("#studentDept").value.trim() || "Information Technology";
-  const sem  = $("#studentSem").value;
-  const div  = $("#studentDiv").value;
+async function saveStudent(){
+  const name = ($("#studentName")||{value:""}).value.trim();
+  const roll = ($("#studentRoll")||{value:""}).value.trim();
+  const dept = ($("#studentDept")||{value:"Information Technology"}).value.trim() || "Information Technology";
+  const sem  = ($("#studentSem") ||{value:"1"}).value;
+  const div  = ($("#studentDiv") ||{value:"A"}).value;
 
   if(!/^[A-Za-z ]+$/.test(name) || name.length < 2){
     toast("Enter a valid student name (letters only, min 2 characters).", "error");
@@ -321,66 +806,78 @@ function saveStudent(){
     return;
   }
 
-  let students = getData(KEYS.students, []);
-
   if(editingStudentId){
-    students = students.map(s => s.id === editingStudentId ? { ...s, name, roll, dept, sem, div } : s);
+    const ok = await dbUpdateStudent(editingStudentId, { name, roll_no:roll, dept, sem, div });
+    if(!ok) return;
+    const idx = _students.findIndex(s => s.id === editingStudentId);
+    if(idx > -1) _students[idx] = { ..._students[idx], name, roll_no:roll, dept, sem, div };
     toast("Student updated.", "success");
     editingStudentId = null;
-    $("#studentSubmitBtn").textContent = "➕ Add Student";
+    const btn = $("#studentSubmitBtn"); if(btn) btn.textContent = "➕ Add Student";
   } else {
-    students.push({ id:uid(), name, roll, dept, sem, div });
+    const dup = _students.find(s => s.roll_no === roll || s.roll === roll);
+    if(dup){ toast("A student with this roll number already exists.", "error"); return; }
+    const created = await dbInsertStudent({ name, roll_no:roll, dept, sem, div });
+    if(!created) return;
+    _students.push(created);
     toast("Student added.", "success");
   }
 
-  setData(KEYS.students, students);
   clearStudentForm();
   renderStudents();
   renderDashboardStats();
 }
 
 function editStudent(id){
-  const s = getData(KEYS.students, []).find(x => x.id === id);
+  const s = _students.find(x => x.id === id);
   if(!s) return;
   editingStudentId = id;
-  $("#studentName").value = s.name;
-  $("#studentRoll").value = s.roll;
-  $("#studentDept").value = s.dept;
-  $("#studentSem").value = s.sem;
-  $("#studentDiv").value = s.div;
-  $("#studentSubmitBtn").textContent = "💾 Save Changes";
-  $("#studentName").scrollIntoView({ behavior:"smooth", block:"center" });
+  const set = (sel, val) => { const el = $(sel); if(el) el.value = val; };
+  set("#studentName", s.name);
+  set("#studentRoll", s.roll_no || s.roll || "");
+  set("#studentDept", s.dept || "");
+  set("#studentSem",  s.sem  || "1");
+  set("#studentDiv",  s.div  || "A");
+  const btn = $("#studentSubmitBtn"); if(btn) btn.textContent = "💾 Save Changes";
+  const el  = $("#studentName"); if(el) el.scrollIntoView({ behavior:"smooth", block:"center" });
 }
 
-function deleteStudent(id){
+async function deleteStudent(id){
   if(!confirm("Remove this student record?")) return;
-  setData(KEYS.students, getData(KEYS.students, []).filter(s => s.id !== id));
+  const ok = await dbDeleteStudent(id);
+  if(!ok) return;
+  _students = _students.filter(s => s.id !== id);
   renderStudents();
   renderDashboardStats();
   toast("Student removed.", "info");
 }
 
 function clearStudentForm(){
-  ["studentName","studentRoll","studentDept"].forEach(id => { const el = $("#"+id); if(el) el.value = ""; });
+  ["#studentName","#studentRoll","#studentDept"].forEach(sel => { const el = $(sel); if(el) el.value = ""; });
   editingStudentId = null;
-  if($("#studentSubmitBtn")) $("#studentSubmitBtn").textContent = "➕ Add Student";
+  const btn = $("#studentSubmitBtn"); if(btn) btn.textContent = "➕ Add Student";
 }
 
-/* ---------------- Admin: Teachers CRUD ---------------- */
+/* ================================================================
+   ADMIN: TEACHERS CRUD
+   ================================================================ */
+
+let editingTeacherId = null;
 
 function renderTeachers(){
   const tbody = $("#teachersBody");
   if(!tbody) return;
-  const teachers = getData(KEYS.teachers, []);
-  tbody.innerHTML = teachers.length ? "" : `<tr class="empty-row"><td colspan="3">No teachers registered yet. Teachers appear here automatically when they sign up.</td></tr>`;
-  teachers.forEach(t=>{
+  tbody.innerHTML = _teachers.length
+    ? ""
+    : `<tr class="empty-row"><td colspan="3">No teachers registered yet. Teachers appear here automatically when they sign up.</td></tr>`;
+  _teachers.forEach(t=>{
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${t.name}</td>
       <td>${t.subject || "—"}</td>
       <td>
         <div class="row-actions">
-          <button class="icon-btn" title="Edit" onclick="editTeacher('${t.id}')">✏️</button>
+          <button class="icon-btn" title="Edit"   onclick="editTeacher('${t.id}')">✏️</button>
           <button class="icon-btn del" title="Delete" onclick="deleteTeacher('${t.id}')">🗑️</button>
         </div>
       </td>`;
@@ -389,9 +886,9 @@ function renderTeachers(){
   populateAdminTimetableSelectors();
 }
 
-function saveTeacher(){
-  const name = $("#teacherName").value.trim();
-  const subject = $("#teacherSubject").value.trim();
+async function saveTeacher(){
+  const name    = ($("#teacherName")   ||{value:""}).value.trim();
+  const subject = ($("#teacherSubject")||{value:""}).value.trim();
 
   if(!/^[A-Za-z .]+$/.test(name) || name.length < 2){
     toast("Enter a valid teacher name.", "error");
@@ -402,57 +899,64 @@ function saveTeacher(){
     return;
   }
 
-  let teachers = getData(KEYS.teachers, []);
-
   if(editingTeacherId){
-    teachers = teachers.map(t => t.id === editingTeacherId ? { ...t, name, subject } : t);
+    const ok = await dbUpdateTeacher(editingTeacherId, { name, subject });
+    if(!ok) return;
+    const idx = _teachers.findIndex(t => t.id === editingTeacherId);
+    if(idx > -1) _teachers[idx] = { ..._teachers[idx], name, subject };
     toast("Teacher updated.", "success");
     editingTeacherId = null;
-    $("#teacherSubmitBtn").textContent = "➕ Add Teacher";
+    const btn = $("#teacherSubmitBtn"); if(btn) btn.textContent = "➕ Add Teacher";
   } else {
-    teachers.push({ id:uid(), name, subject });
+    const dup = _teachers.find(t => t.name === name);
+    if(dup){ toast("A teacher with this name already exists.", "error"); return; }
+    const created = await dbInsertTeacher({ name, subject });
+    if(!created) return;
+    _teachers.push(created);
     toast("Teacher added.", "success");
   }
 
-  setData(KEYS.teachers, teachers);
   clearTeacherForm();
   renderTeachers();
   renderDashboardStats();
 }
 
 function editTeacher(id){
-  const t = getData(KEYS.teachers, []).find(x => x.id === id);
+  const t = _teachers.find(x => x.id === id);
   if(!t) return;
   editingTeacherId = id;
-  $("#teacherName").value = t.name;
-  $("#teacherSubject").value = t.subject;
-  $("#teacherSubmitBtn").textContent = "💾 Save Changes";
-  $("#teacherName").scrollIntoView({ behavior:"smooth", block:"center" });
+  const set = (sel, val) => { const el = $(sel); if(el) el.value = val; };
+  set("#teacherName",    t.name);
+  set("#teacherSubject", t.subject || "");
+  const btn = $("#teacherSubmitBtn"); if(btn) btn.textContent = "💾 Save Changes";
+  const el  = $("#teacherName"); if(el) el.scrollIntoView({ behavior:"smooth", block:"center" });
 }
 
-function deleteTeacher(id){
+async function deleteTeacher(id){
   if(!confirm("Remove this teacher record?")) return;
-  setData(KEYS.teachers, getData(KEYS.teachers, []).filter(t => t.id !== id));
+  const ok = await dbDeleteTeacher(id);
+  if(!ok) return;
+  _teachers = _teachers.filter(t => t.id !== id);
   renderTeachers();
   renderDashboardStats();
   toast("Teacher removed.", "info");
 }
 
 function clearTeacherForm(){
-  ["teacherName","teacherSubject"].forEach(id => { const el = $("#"+id); if(el) el.value = ""; });
+  ["#teacherName","#teacherSubject"].forEach(sel => { const el = $(sel); if(el) el.value = ""; });
   editingTeacherId = null;
-  if($("#teacherSubmitBtn")) $("#teacherSubmitBtn").textContent = "➕ Add Teacher";
+  const btn = $("#teacherSubmitBtn"); if(btn) btn.textContent = "➕ Add Teacher";
 }
 
-/* ---------------- Read-only Classroom Status (Teacher & Student dashboards) ---------------- */
+/* ================================================================
+   CLASSROOM STATUS (read-only — Teacher & Student dashboards)
+   ================================================================ */
 
 function renderClassroomStatusReadOnly(containerId){
   const wrap = $("#" + containerId);
   if(!wrap) return;
-  const rooms = getData(KEYS.classrooms, []);
-
-  wrap.innerHTML = rooms.length ? "" : `<p class="muted">No classrooms have been added yet.</p>`;
-  rooms.forEach(r=>{
+  wrap.innerHTML = _classrooms.length ? "" : `<p class="muted">No classrooms have been added yet.</p>`;
+  _classrooms.forEach(r=>{
     const div = document.createElement("div");
     div.className = "card punched";
     div.innerHTML = `
@@ -468,16 +972,25 @@ function renderClassroomStatusReadOnly(containerId){
   });
 }
 
-/* ---------------- Admin: Classrooms CRUD ---------------- */
+/* ================================================================
+   ADMIN: CLASSROOMS CRUD
+   ================================================================ */
+
+let editingRoomId = null;
+
+function badge(bool){
+  return `<span class="badge ${bool ? 'on' : 'off'}">${bool ? 'Yes' : 'No'}</span>`;
+}
 
 function renderClassrooms(){
-  const tbody = $("#classroomsBody");
-  const cardsWrap = $("#classroomCards");
-  const rooms = getData(KEYS.classrooms, []);
+  const tbody    = $("#classroomsBody");
+  const cardsWrap= $("#classroomCards");
 
   if(tbody){
-    tbody.innerHTML = rooms.length ? "" : `<tr class="empty-row"><td colspan="8">No classrooms added yet.</td></tr>`;
-    rooms.forEach(r=>{
+    tbody.innerHTML = _classrooms.length
+      ? ""
+      : `<tr class="empty-row"><td colspan="8">No classrooms added yet.</td></tr>`;
+    _classrooms.forEach(r=>{
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${r.room}</td>
@@ -489,8 +1002,8 @@ function renderClassrooms(){
         <td><span class="badge ${r.status === 'Available' ? 'available' : 'occupied'}">${r.status}</span></td>
         <td>
           <div class="row-actions">
-            <button class="icon-btn" title="Toggle status" onclick="toggleRoomStatus('${r.id}')">🔁</button>
-            <button class="icon-btn" title="Edit" onclick="editRoom('${r.id}')">✏️</button>
+            <button class="icon-btn" title="Toggle" onclick="toggleRoomStatus('${r.id}')">🔁</button>
+            <button class="icon-btn" title="Edit"   onclick="editRoom('${r.id}')">✏️</button>
             <button class="icon-btn del" title="Delete" onclick="deleteRoom('${r.id}')">🗑️</button>
           </div>
         </td>`;
@@ -500,7 +1013,7 @@ function renderClassrooms(){
 
   if(cardsWrap){
     cardsWrap.innerHTML = "";
-    rooms.forEach(r=>{
+    _classrooms.forEach(r=>{
       const div = document.createElement("div");
       div.className = "card punched";
       div.innerHTML = `
@@ -518,217 +1031,173 @@ function renderClassrooms(){
   populateAdminTimetableSelectors();
 }
 
-function badge(bool){
-  return `<span class="badge ${bool ? 'on' : 'off'}">${bool ? 'Yes' : 'No'}</span>`;
-}
+async function saveRoom(){
+  const room       = ($("#roomName")||{value:""}).value.trim();
+  const capacity   = parseInt(($("#roomCapacity")||{value:"0"}).value, 10) || 0;
+  const smartboard = ($("#roomSmartboard")||{checked:false}).checked;
+  const projector  = ($("#roomProjector") ||{checked:false}).checked;
+  const wifi       = ($("#roomWifi")      ||{checked:false}).checked;
+  const ac         = ($("#roomAc")        ||{checked:false}).checked;
+  const status     = ($("#roomStatus")    ||{value:"Available"}).value;
 
-function saveRoom(){
-  const room = $("#roomName").value.trim();
-  const capacity = parseInt($("#roomCapacity").value, 10) || 0;
-  const smartboard = $("#roomSmartboard").checked;
-  const projector = $("#roomProjector").checked;
-  const wifi = $("#roomWifi").checked;
-  const ac = $("#roomAc").checked;
-  const status = $("#roomStatus").value;
-
-  if(room === ""){
-    toast("Classroom name is required.", "error");
-    return;
-  }
-  if(capacity <= 0){
-    toast("Enter a valid capacity.", "error");
-    return;
-  }
-
-  let rooms = getData(KEYS.classrooms, []);
+  if(room === ""){    toast("Classroom name is required.", "error"); return; }
+  if(capacity <= 0){  toast("Enter a valid capacity.", "error");     return; }
 
   if(editingRoomId){
-    rooms = rooms.map(r => r.id === editingRoomId ? { ...r, room, capacity, smartboard, projector, wifi, ac, status } : r);
+    const ok = await dbUpdateClassroom(editingRoomId, { room, capacity, smartboard, projector, wifi, ac, status });
+    if(!ok) return;
+    const idx = _classrooms.findIndex(r => r.id === editingRoomId);
+    if(idx > -1) _classrooms[idx] = { ..._classrooms[idx], room, capacity, smartboard, projector, wifi, ac, status };
     toast("Classroom updated.", "success");
     editingRoomId = null;
-    $("#roomSubmitBtn").textContent = "➕ Add Classroom";
+    const btn = $("#roomSubmitBtn"); if(btn) btn.textContent = "➕ Add Classroom";
   } else {
-    rooms.push({ id:uid(), room, capacity, smartboard, projector, wifi, ac, status });
+    const created = await dbInsertClassroom({ room, capacity, smartboard, projector, wifi, ac, status });
+    if(!created) return;
+    _classrooms.push(created);
     toast("Classroom added.", "success");
   }
 
-  setData(KEYS.classrooms, rooms);
   clearRoomForm();
   renderClassrooms();
   renderDashboardStats();
 }
 
 function editRoom(id){
-  const r = getData(KEYS.classrooms, []).find(x => x.id === id);
+  const r = _classrooms.find(x => x.id === id);
   if(!r) return;
   editingRoomId = id;
-  $("#roomName").value = r.room;
-  $("#roomCapacity").value = r.capacity;
-  $("#roomSmartboard").checked = r.smartboard;
-  $("#roomProjector").checked = r.projector;
-  $("#roomWifi").checked = r.wifi;
-  $("#roomAc").checked = r.ac;
-  $("#roomStatus").value = r.status;
-  $("#roomSubmitBtn").textContent = "💾 Save Changes";
-  $("#roomName").scrollIntoView({ behavior:"smooth", block:"center" });
+  const set = (sel, val) => { const el = $(sel); if(el) el.value = val; };
+  set("#roomName",     r.room);
+  set("#roomCapacity", r.capacity);
+  set("#roomStatus",   r.status);
+  const setCk = (sel, val) => { const el = $(sel); if(el) el.checked = val; };
+  setCk("#roomSmartboard", r.smartboard);
+  setCk("#roomProjector",  r.projector);
+  setCk("#roomWifi",       r.wifi);
+  setCk("#roomAc",         r.ac);
+  const btn = $("#roomSubmitBtn"); if(btn) btn.textContent = "💾 Save Changes";
+  const el  = $("#roomName"); if(el) el.scrollIntoView({ behavior:"smooth", block:"center" });
 }
 
-function toggleRoomStatus(id){
-  const rooms = getData(KEYS.classrooms, []).map(r =>
-    r.id === id ? { ...r, status: r.status === "Available" ? "Occupied" : "Available" } : r
-  );
-  setData(KEYS.classrooms, rooms);
+async function toggleRoomStatus(id){
+  const r = _classrooms.find(x => x.id === id);
+  if(!r) return;
+  const newStatus = r.status === "Available" ? "Occupied" : "Available";
+  const ok = await dbUpdateClassroom(id, { ...r, status: newStatus });
+  if(!ok) return;
+  r.status = newStatus;
   renderClassrooms();
 }
 
-function deleteRoom(id){
+async function deleteRoom(id){
   if(!confirm("Remove this classroom?")) return;
-  setData(KEYS.classrooms, getData(KEYS.classrooms, []).filter(r => r.id !== id));
+  const ok = await dbDeleteClassroom(id);
+  if(!ok) return;
+  _classrooms = _classrooms.filter(r => r.id !== id);
   renderClassrooms();
   renderDashboardStats();
   toast("Classroom removed.", "info");
 }
 
 function clearRoomForm(){
-  $("#roomName").value = "";
-  $("#roomCapacity").value = "";
-  ["roomSmartboard","roomProjector","roomWifi","roomAc"].forEach(id => { const el = $("#"+id); if(el) el.checked = false; });
-  $("#roomStatus").value = "Available";
+  const set = (sel, val) => { const el = $(sel); if(el) el.value = val; };
+  set("#roomName",""); set("#roomCapacity",""); set("#roomStatus","Available");
+  ["#roomSmartboard","#roomProjector","#roomWifi","#roomAc"].forEach(sel => { const el = $(sel); if(el) el.checked = false; });
   editingRoomId = null;
-  if($("#roomSubmitBtn")) $("#roomSubmitBtn").textContent = "➕ Add Classroom";
+  const btn = $("#roomSubmitBtn"); if(btn) btn.textContent = "➕ Add Classroom";
 }
 
-/* ---------------- Teacher: lecture scheduling ---------------- */
-
-/* ---------------- Notifications (admin → teacher) ---------------- */
-
-function getAllNotifications(){ return getData(KEYS.notifications, []); }
-
-function pushNotification(teacherName, message){
-  const notes = getAllNotifications();
-  notes.unshift({ id:uid(), teacher:teacherName, message, ts:Date.now(), read:false });
-  setData(KEYS.notifications, notes);
-}
-
-function renderTeacherNotifications(){
-  const list = $("#notificationsList");
-  if(!list) return;
-  const user = getCurrentUser();
-  const mine = getAllNotifications().filter(n => n.teacher === user.name);
-  const unread = mine.filter(n => !n.read).length;
-
-  const badge = $("#unreadBadge");
-  if(badge){
-    badge.style.display = unread ? "inline-flex" : "none";
-    badge.textContent = `${unread} new`;
-  }
-
-  list.innerHTML = mine.length ? "" : `<p class="muted">No notifications yet. You'll see a message here if an admin changes one of your lectures.</p>`;
-  mine.forEach(n=>{
-    const div = document.createElement("div");
-    div.className = "notice";
-    if(!n.read) div.style.borderLeftColor = "var(--accent-3)";
-    const when = new Date(n.ts).toLocaleString();
-    div.innerHTML = `${n.read ? "" : "<b>● New —</b> "}${n.message} <div class="muted" style="margin-top:4px;">${when}</div>`;
-    list.appendChild(div);
-  });
-}
-
-function markNotificationsRead(){
-  const user = getCurrentUser();
-  const notes = getAllNotifications().map(n => n.teacher === user.name ? { ...n, read:true } : n);
-  setData(KEYS.notifications, notes);
-  renderTeacherNotifications();
-  toast("Notifications cleared.", "info");
-}
-
-/* ---------------- Timetable: conflict check ---------------- */
+/* ================================================================
+   TIMETABLE: CONFLICT CHECK
+   ================================================================ */
 
 function hasConflict(day, time, room, teacherName, excludeId){
-  const timetable = getData(KEYS.timetable, []);
-  return timetable.some(t =>
+  return _timetable.some(t =>
     t.id !== excludeId &&
     t.day === day && t.time === time &&
     (t.room === room || t.teacher === teacherName)
   );
 }
 
-/* ---------------- Teacher: manual add / edit / delete (own lectures only) ---------------- */
+/* ================================================================
+   TEACHER: MANUAL ADD / EDIT / DELETE (own lectures only)
+   ================================================================ */
 
 let editingLectureId = null;
 
-function saveLecture(){
-  const user = getCurrentUser();
-  const subject = $("#subject").value.trim();
-  const sem = $("#lecSem").value;
-  const div = $("#lecDiv").value;
-  const room = $("#room").value;
-  const day = $("#lecDay").value;
-  const time = $("#time").value;
+async function saveLecture(){
+  const user    = getCurrentUser();
+  const subject = ($("#subject") ||{value:""}).value.trim();
+  const sem     = ($("#lecSem")  ||{value:"5"}).value;
+  const div     = ($("#lecDiv")  ||{value:"A"}).value;
+  const room    = ($("#room")    ||{value:""}).value;
+  const day     = ($("#lecDay")  ||{value:"Monday"}).value;
+  const time    = ($("#time")    ||{value:""}).value;
 
-  if(subject === ""){
-    toast("Please enter a subject.", "error");
-    return;
-  }
-
-  let timetable = getData(KEYS.timetable, []);
+  if(subject === ""){ toast("Please enter a subject.", "error"); return; }
 
   if(editingLectureId){
-    const original = timetable.find(t => t.id === editingLectureId);
+    const original = _timetable.find(t => t.id === editingLectureId);
     if(!original || original.teacher !== user.name){
-      toast("You can only edit your own lectures.", "error");
-      return;
+      toast("You can only edit your own lectures.", "error"); return;
     }
     if(hasConflict(day, time, room, user.name, editingLectureId)){
-      toast(`Clash detected: ${room} or ${user.name} is already booked on ${day} at ${time}.`, "error");
-      return;
+      toast(`Clash detected: ${room} or ${user.name} is already booked on ${day} at ${time}.`, "error"); return;
     }
-    timetable = timetable.map(t => t.id === editingLectureId ? { ...t, day, time, subject, room, sem, div } : t);
+    const ok = await dbUpdateTimetable(editingLectureId, { day, time, subject, teacher:user.name, room, sem, div });
+    if(!ok) return;
+    const idx = _timetable.findIndex(t => t.id === editingLectureId);
+    if(idx > -1) _timetable[idx] = { ..._timetable[idx], day, time, subject, room, sem, div };
     toast("Lecture updated.", "success");
     editingLectureId = null;
-    $("#lectureSubmitBtn").textContent = "📌 Add to Timetable";
+    const btn = $("#lectureSubmitBtn"); if(btn) btn.textContent = "📌 Add to Timetable";
   } else {
     if(hasConflict(day, time, room, user.name)){
-      toast(`Clash detected: ${room} or ${user.name} is already booked on ${day} at ${time}.`, "error");
-      return;
+      toast(`Clash detected: ${room} or ${user.name} is already booked on ${day} at ${time}.`, "error"); return;
     }
-    timetable.push({ id:uid(), day, time, subject, teacher:user.name, room, sem, div });
+    const created = await dbInsertTimetable({ day, time, subject, teacher:user.name, room, sem, div });
+    if(!created) return;
+    _timetable.push(created);
     toast("Lecture scheduled successfully!", "success");
   }
 
-  setData(KEYS.timetable, timetable);
-  $("#subject").value = "";
+  const el = $("#subject"); if(el) el.value = "";
   renderTeacherLectures();
 }
 
 function editLecture(id){
-  const user = getCurrentUser();
-  const lecture = getData(KEYS.timetable, []).find(t => t.id === id);
+  const user    = getCurrentUser();
+  const lecture = _timetable.find(t => t.id === id);
   if(!lecture || lecture.teacher !== user.name){
-    toast("You can only edit your own lectures.", "error");
-    return;
+    toast("You can only edit your own lectures.", "error"); return;
   }
   editingLectureId = id;
-  $("#subject").value = lecture.subject;
-  $("#lecSem").value = lecture.sem;
-  $("#lecDiv").value = lecture.div;
-  $("#room").value = lecture.room;
-  $("#lecDay").value = lecture.day;
-  $("#time").value = lecture.time;
-  $("#lectureSubmitBtn").textContent = "💾 Save Changes";
-  $("#subject").scrollIntoView({ behavior:"smooth", block:"center" });
+  const set = (sel, val) => { const el = $(sel); if(el) el.value = val; };
+  set("#subject", lecture.subject);
+  set("#lecSem",  lecture.sem);
+  set("#lecDiv",  lecture.div);
+  set("#room",    lecture.room);
+  set("#lecDay",  lecture.day);
+  set("#time",    lecture.time);
+  const btn = $("#lectureSubmitBtn"); if(btn) btn.textContent = "💾 Save Changes";
+  const el  = $("#subject"); if(el) el.scrollIntoView({ behavior:"smooth", block:"center" });
 }
 
-function deleteLecture(id){
-  const user = getCurrentUser();
-  const lecture = getData(KEYS.timetable, []).find(t => t.id === id);
+async function deleteLecture(id){
+  const user    = getCurrentUser();
+  const lecture = _timetable.find(t => t.id === id);
   if(!lecture || lecture.teacher !== user.name){
-    toast("You can only delete your own lectures.", "error");
-    return;
+    toast("You can only delete your own lectures.", "error"); return;
   }
   if(!confirm("Remove this lecture from the timetable?")) return;
-  setData(KEYS.timetable, getData(KEYS.timetable, []).filter(t => t.id !== id));
-  if(editingLectureId === id){ editingLectureId = null; $("#lectureSubmitBtn").textContent = "📌 Add to Timetable"; }
+  const ok = await dbDeleteTimetable(id);
+  if(!ok) return;
+  _timetable = _timetable.filter(t => t.id !== id);
+  if(editingLectureId === id){
+    editingLectureId = null;
+    const btn = $("#lectureSubmitBtn"); if(btn) btn.textContent = "📌 Add to Timetable";
+  }
   renderTeacherLectures();
   toast("Lecture removed.", "info");
 }
@@ -737,9 +1206,10 @@ function renderTeacherLectures(){
   const tbody = $("#lectureBody");
   if(!tbody) return;
   const user = getCurrentUser();
-  const rows = getData(KEYS.timetable, []).filter(t => t.teacher === user.name);
-
-  tbody.innerHTML = rows.length ? "" : `<tr class="empty-row"><td colspan="7">No lectures scheduled yet. Add one above, or generate a full week automatically.</td></tr>`;
+  const rows = _timetable.filter(t => t.teacher === user.name);
+  tbody.innerHTML = rows.length
+    ? ""
+    : `<tr class="empty-row"><td colspan="7">No lectures scheduled yet. Add one above, or generate a full week automatically.</td></tr>`;
   rows.forEach(t=>{
     const tr = document.createElement("tr");
     tr.innerHTML = `
@@ -748,10 +1218,10 @@ function renderTeacherLectures(){
       <td>${t.subject}</td>
       <td>${t.room}</td>
       <td>Sem ${t.sem}</td>
-      <td>${t.div}</td>
+      <td>${t.div || "A"}</td>
       <td>
         <div class="row-actions">
-          <button class="icon-btn" title="Edit" onclick="editLecture('${t.id}')">✏️</button>
+          <button class="icon-btn" title="Edit"   onclick="editLecture('${t.id}')">✏️</button>
           <button class="icon-btn del" title="Delete" onclick="deleteLecture('${t.id}')">🗑️</button>
         </div>
       </td>`;
@@ -759,114 +1229,106 @@ function renderTeacherLectures(){
   });
 }
 
-/* ---------------- Admin: manage the FULL timetable (any teacher, any slot) ---------------- */
+/* ================================================================
+   ADMIN: FULL TIMETABLE CRUD
+   ================================================================ */
 
 let editingAdminLectureId = null;
 
 function populateAdminTimetableSelectors(){
   const teacherSel = $("#ttTeacher");
-  const roomSel = $("#ttRoom");
+  const roomSel    = $("#ttRoom");
   if(!teacherSel || !roomSel) return;
 
-  // Show any teacher we know about: registered through the registration page,
-  // added manually to the directory, OR already appearing in the timetable
-  // (e.g. a teacher who signed in via Login and generated their own schedule).
-  const regUsers = getData(KEYS.registeredUsers, []);
-  const registeredNames = regUsers.filter(u => u.role === "teacher").map(u => u.name);
-  const directoryNames = getData(KEYS.teachers, []).map(t => t.name);
-  const timetableNames = getData(KEYS.timetable, []).map(t => t.teacher);
-
-  const teacherNames = Array.from(new Set([...registeredNames, ...directoryNames, ...timetableNames]))
-    .filter(Boolean);
-
-  const rooms = getData(KEYS.classrooms, []);
+  // Show all known teacher names: from DB + from timetable entries (in case a teacher
+  // signed in via Login before Supabase was integrated)
+  const dbNames = _teachers.map(t => t.name);
+  const ttNames = _timetable.map(t => t.teacher);
+  const teacherNames = Array.from(new Set([...dbNames, ...ttNames])).filter(Boolean);
 
   teacherSel.innerHTML = teacherNames.length
     ? teacherNames.map(n => `<option value="${n}">${n}</option>`).join("")
     : `<option value="">No teachers registered yet</option>`;
 
-  roomSel.innerHTML = rooms.length
-    ? rooms.map(r => `<option value="${r.room}">${r.room}</option>`).join("")
+  roomSel.innerHTML = _classrooms.length
+    ? _classrooms.map(r => `<option value="${r.room}">${r.room}</option>`).join("")
     : `<option value="">Add a classroom first</option>`;
 }
 
-function adminSaveLecture(){
-  const subject = $("#ttSubject").value.trim();
-  const teacher = $("#ttTeacher").value;
-  const room = $("#ttRoom").value;
-  const day = $("#ttDay").value;
-  const time = $("#ttTime").value;
-  const sem = $("#ttSem").value;
+async function adminSaveLecture(){
+  const subject = ($("#ttSubject")||{value:""}).value.trim();
+  const teacher = ($("#ttTeacher")||{value:""}).value;
+  const room    = ($("#ttRoom")   ||{value:""}).value;
+  const day     = ($("#ttDay")    ||{value:"Monday"}).value;
+  const time    = ($("#ttTime")   ||{value:""}).value;
+  const sem     = ($("#ttSem")    ||{value:"5"}).value;
 
-  if(subject === ""){
-    toast("Please enter a subject.", "error");
-    return;
-  }
-  if(teacher === ""){
-    toast("Add at least one teacher before scheduling a lecture.", "error");
-    return;
-  }
-
-  let timetable = getData(KEYS.timetable, []);
+  if(subject === ""){ toast("Please enter a subject.", "error"); return; }
+  if(teacher === ""){ toast("Add at least one teacher before scheduling a lecture.", "error"); return; }
 
   if(editingAdminLectureId){
-    const original = timetable.find(t => t.id === editingAdminLectureId);
+    const original = _timetable.find(t => t.id === editingAdminLectureId);
     if(hasConflict(day, time, room, teacher, editingAdminLectureId)){
-      toast(`Clash detected: ${room} or ${teacher} is already booked on ${day} at ${time}.`, "error");
-      return;
+      toast(`Clash detected: ${room} or ${teacher} is already booked on ${day} at ${time}.`, "error"); return;
     }
-    timetable = timetable.map(t => t.id === editingAdminLectureId ? { ...t, day, time, subject, teacher, room, sem } : t);
-    setData(KEYS.timetable, timetable);
+    const ok = await dbUpdateTimetable(editingAdminLectureId, { day, time, subject, teacher, room, sem, div:"A" });
+    if(!ok) return;
+    const idx = _timetable.findIndex(t => t.id === editingAdminLectureId);
+    if(idx > -1) _timetable[idx] = { ..._timetable[idx], day, time, subject, teacher, room, sem };
 
     if(original){
-      pushNotification(original.teacher,
+      await pushNotification(original.teacher,
         `An admin updated your ${original.subject} lecture (was ${original.day}, ${original.time}). It's now "${subject}" on ${day} at ${time} in ${room}.`);
       if(teacher !== original.teacher){
-        pushNotification(teacher, `An admin assigned you a new lecture: ${subject} on ${day} at ${time} in ${room}.`);
+        await pushNotification(teacher, `An admin assigned you a new lecture: ${subject} on ${day} at ${time} in ${room}.`);
       }
     }
     toast("Lecture updated and teacher notified.", "success");
     editingAdminLectureId = null;
-    $("#ttSubmitBtn").textContent = "➕ Add Lecture";
+    const btn = $("#ttSubmitBtn"); if(btn) btn.textContent = "➕ Add Lecture";
   } else {
     if(hasConflict(day, time, room, teacher)){
-      toast(`Clash detected: ${room} or ${teacher} is already booked on ${day} at ${time}.`, "error");
-      return;
+      toast(`Clash detected: ${room} or ${teacher} is already booked on ${day} at ${time}.`, "error"); return;
     }
-    timetable.push({ id:uid(), day, time, subject, teacher, room, sem, div:"A" });
-    setData(KEYS.timetable, timetable);
-    pushNotification(teacher, `An admin scheduled a new lecture for you: ${subject} on ${day} at ${time} in ${room}.`);
+    const created = await dbInsertTimetable({ day, time, subject, teacher, room, sem, div:"A" });
+    if(!created) return;
+    _timetable.push(created);
+    await pushNotification(teacher, `An admin scheduled a new lecture for you: ${subject} on ${day} at ${time} in ${room}.`);
     toast("Lecture added and teacher notified.", "success");
   }
 
-  $("#ttSubject").value = "";
+  const el = $("#ttSubject"); if(el) el.value = "";
   renderAdminTimetable();
   renderDashboardStats();
 }
 
 function adminEditLecture(id){
-  const t = getData(KEYS.timetable, []).find(x => x.id === id);
+  const t = _timetable.find(x => x.id === id);
   if(!t) return;
   editingAdminLectureId = id;
-  $("#ttSubject").value = t.subject;
-  $("#ttTeacher").value = t.teacher;
-  $("#ttRoom").value = t.room;
-  $("#ttDay").value = t.day;
-  $("#ttTime").value = t.time;
-  $("#ttSem").value = t.sem;
-  $("#ttSubmitBtn").textContent = "💾 Save Changes";
-  $("#ttSubject").scrollIntoView({ behavior:"smooth", block:"center" });
+  const set = (sel, val) => { const el = $(sel); if(el) el.value = val; };
+  set("#ttSubject", t.subject);
+  set("#ttTeacher", t.teacher);
+  set("#ttRoom",    t.room);
+  set("#ttDay",     t.day);
+  set("#ttTime",    t.time);
+  set("#ttSem",     t.sem);
+  const btn = $("#ttSubmitBtn"); if(btn) btn.textContent = "💾 Save Changes";
+  const el  = $("#ttSubject"); if(el) el.scrollIntoView({ behavior:"smooth", block:"center" });
 }
 
-function adminDeleteLecture(id){
-  const t = getData(KEYS.timetable, []).find(x => x.id === id);
+async function adminDeleteLecture(id){
+  const t = _timetable.find(x => x.id === id);
   if(!t) return;
   if(!confirm(`Remove ${t.subject} (${t.day}, ${t.time}) from ${t.teacher}'s timetable?`)) return;
-
-  setData(KEYS.timetable, getData(KEYS.timetable, []).filter(x => x.id !== id));
-  pushNotification(t.teacher, `An admin removed your ${t.subject} lecture on ${t.day} at ${t.time}.`);
-
-  if(editingAdminLectureId === id){ editingAdminLectureId = null; $("#ttSubmitBtn").textContent = "➕ Add Lecture"; }
+  const ok = await dbDeleteTimetable(id);
+  if(!ok) return;
+  _timetable = _timetable.filter(x => x.id !== id);
+  await pushNotification(t.teacher, `An admin removed your ${t.subject} lecture on ${t.day} at ${t.time}.`);
+  if(editingAdminLectureId === id){
+    editingAdminLectureId = null;
+    const btn = $("#ttSubmitBtn"); if(btn) btn.textContent = "➕ Add Lecture";
+  }
   renderAdminTimetable();
   renderDashboardStats();
   toast("Lecture removed and teacher notified.", "info");
@@ -875,11 +1337,12 @@ function adminDeleteLecture(id){
 function renderAdminTimetable(){
   const tbody = $("#adminTimetableBody");
   if(!tbody) return;
-  const rows = getData(KEYS.timetable, []).slice().sort((a,b)=>
+  const rows = _timetable.slice().sort((a,b)=>
     DAYS.indexOf(a.day)-DAYS.indexOf(b.day) || SLOTS.indexOf(a.time)-SLOTS.indexOf(b.time)
   );
-
-  tbody.innerHTML = rows.length ? "" : `<tr class="empty-row"><td colspan="7">No lectures scheduled yet.</td></tr>`;
+  tbody.innerHTML = rows.length
+    ? ""
+    : `<tr class="empty-row"><td colspan="7">No lectures scheduled yet.</td></tr>`;
   rows.forEach(t=>{
     const tr = document.createElement("tr");
     tr.innerHTML = `
@@ -891,7 +1354,7 @@ function renderAdminTimetable(){
       <td>Sem ${t.sem}</td>
       <td>
         <div class="row-actions">
-          <button class="icon-btn" title="Edit" onclick="adminEditLecture('${t.id}')">✏️</button>
+          <button class="icon-btn" title="Edit"   onclick="adminEditLecture('${t.id}')">✏️</button>
           <button class="icon-btn del" title="Delete" onclick="adminDeleteLecture('${t.id}')">🗑️</button>
         </div>
       </td>`;
@@ -899,59 +1362,88 @@ function renderAdminTimetable(){
   });
 }
 
-/* ---------------- AI Timetable Generator (conflict-free) ---------------- */
+/* ================================================================
+   AI TIMETABLE GENERATOR (conflict-free)
+   ================================================================ */
 
-function generateAITimetable(scopeTeacherOnly){
-  const user = getCurrentUser();
-  const teachers = getData(KEYS.teachers, []);
-  const rooms = getData(KEYS.classrooms, []).map(r => r.room);
-  let timetable = getData(KEYS.timetable, []);
-
-  if(!rooms.length){
-    toast("Add at least one classroom before generating a timetable.", "error");
-    return;
-  }
-
+async function generateAITimetable(scopeTeacherOnly){
+  const user        = getCurrentUser();
+  const rooms       = _classrooms.map(r => r.room);
   const teacherName = user && user.role === "teacher" ? user.name : null;
 
-  // If generating for a single teacher, remove their old slots first.
-  if(scopeTeacherOnly && teacherName){
-    timetable = timetable.filter(t => t.teacher !== teacherName);
-    editingLectureId = null;
-    if($("#lectureSubmitBtn")) $("#lectureSubmitBtn").textContent = "📌 Add to Timetable";
+  if(!rooms.length){
+    toast("Add at least one classroom before generating a timetable.", "error"); return;
   }
 
-  DAYS.forEach(day=>{
-    SLOTS.forEach(time=>{
-      const bookedRooms = new Set(timetable.filter(t => t.day===day && t.time===time).map(t=>t.room));
-      const bookedTeachers = new Set(timetable.filter(t => t.day===day && t.time===time).map(t=>t.teacher));
+  // Build local working copy
+  let workingTT = [..._timetable];
+
+  if(scopeTeacherOnly && teacherName){
+    // Delete this teacher's existing slots from DB
+    const mySlots = workingTT.filter(t => t.teacher === teacherName);
+    await Promise.all(mySlots.map(t => dbDeleteTimetable(t.id)));
+    workingTT = workingTT.filter(t => t.teacher !== teacherName);
+    editingLectureId = null;
+    const btn = $("#lectureSubmitBtn"); if(btn) btn.textContent = "📌 Add to Timetable";
+  }
+
+  const newEntries = [];
+  for(const day of DAYS){
+    for(const time of SLOTS){
+      const bookedRooms    = new Set(workingTT.filter(t => t.day===day && t.time===time).map(t=>t.room));
+      const bookedTeachers = new Set(workingTT.filter(t => t.day===day && t.time===time).map(t=>t.teacher));
 
       const availableRooms = rooms.filter(r => !bookedRooms.has(r));
-      if(!availableRooms.length) return; // fully booked slot, skip (no clash created)
+      if(!availableRooms.length) continue;
 
-      const room = availableRooms[Math.floor(Math.random()*availableRooms.length)];
+      const room    = availableRooms[Math.floor(Math.random()*availableRooms.length)];
       const subject = SUBJECT_POOL[Math.floor(Math.random()*SUBJECT_POOL.length)];
 
       let teacher = teacherName;
       if(!teacher){
-        const availableTeachers = teachers.map(t=>t.name).filter(n => !bookedTeachers.has(n));
+        const allTeacherNames   = _teachers.map(t=>t.name);
+        const availableTeachers = allTeacherNames.filter(n => !bookedTeachers.has(n));
         teacher = availableTeachers.length
           ? availableTeachers[Math.floor(Math.random()*availableTeachers.length)]
-          : (teachers[0] ? teachers[0].name : "Staff");
-        if(bookedTeachers.has(teacher)) return; // avoid double-booking as a last resort
+          : (allTeacherNames[0] || "Staff");
+        if(bookedTeachers.has(teacher)) continue;
       }
 
-      timetable.push({ id:uid(), day, time, subject, teacher, room, sem:"5", div:"A" });
-    });
-  });
+      const entry = { day, time, subject, teacher, room, sem:"5", div:"A" };
+      newEntries.push(entry);
+      workingTT.push({ ...entry, id:"tmp_"+uid() }); // track locally for conflict avoidance
+    }
+  }
 
-  setData(KEYS.timetable, timetable);
+  // Insert all new entries into Supabase
+  let inserted = [];
+  if(sb() && newEntries.length){
+    const { data, error } = await sb().from("timetable").insert(
+      newEntries.map(e => ({ day:e.day, time:e.time, subject:e.subject, teacher:e.teacher, room:e.room, sem:e.sem, div:e.div }))
+    ).select();
+    if(error){
+      toast("AI timetable DB error: " + error.message, "error");
+      return;
+    }
+    inserted = data || [];
+  } else {
+    inserted = newEntries.map(e => ({ ...e, id:uid() }));
+  }
+
+  // Refresh in-memory timetable
+  _timetable = scopeTeacherOnly && teacherName
+    ? [...workingTT.filter(t => !t.id.toString().startsWith("tmp_")), ...inserted]
+    : inserted;
+
+  // Full re-fetch to get clean IDs
+  _timetable = await fetchTimetable();
+
   toast("✅ AI Timetable generated — conflicts avoided automatically!", "success");
 
-  // A full-college regeneration (admin, not scoped to one teacher) touches everyone's
-  // schedule — notify each teacher once rather than spamming a message per slot.
   if(!scopeTeacherOnly && user && user.role === "admin"){
-    teachers.forEach(t => pushNotification(t.name, "An admin regenerated the full-college AI timetable. Please check your schedule for changes."));
+    await Promise.all(_teachers.map(t =>
+      pushNotification(t.name, "An admin regenerated the full-college AI timetable. Please check your schedule for changes.")
+    ));
   }
 
   renderTeacherLectures();
@@ -962,13 +1454,13 @@ function generateAITimetable(scopeTeacherOnly){
   renderAdminTimetable();
 }
 
-/* ---------------- Full timetable view (timetable.html) ---------------- */
+/* ================================================================
+   FULL TIMETABLE VIEW
+   ================================================================ */
 
 function renderFullTimetable(filter){
   const grid = $("#fullTimetableGrid");
   if(!grid) return;
-
-  const timetable = getData(KEYS.timetable, []);
   const query = (filter || "").trim().toLowerCase();
 
   let html = `<div class="tt-cell head">Time</div>`;
@@ -977,11 +1469,8 @@ function renderFullTimetable(filter){
   SLOTS.forEach(time=>{
     html += `<div class="tt-cell time">${time}</div>`;
     DAYS.forEach(day=>{
-      const entry = timetable.find(t => t.day === day && t.time === time);
-      if(!entry){
-        html += `<div class="tt-cell slot empty">Free</div>`;
-        return;
-      }
+      const entry = _timetable.find(t => t.day === day && t.time === time);
+      if(!entry){ html += `<div class="tt-cell slot empty">Free</div>`; return; }
       const matches = query && (entry.subject.toLowerCase().includes(query) || day.toLowerCase().includes(query));
       html += `<div class="tt-cell slot ${matches ? 'match' : ''}">
         <span class="subj">${entry.subject}</span>
@@ -994,21 +1483,23 @@ function renderFullTimetable(filter){
 }
 
 function searchFullTimetable(){
-  const q = $("#ttSearch").value;
+  const q = ($("#ttSearch")||{value:""}).value;
   renderFullTimetable(q);
 }
 
-/* ---------------- Student dashboard ---------------- */
+/* ================================================================
+   STUDENT DASHBOARD
+   ================================================================ */
 
 function renderStudentTimetable(){
   const tbody = $("#studentTodayBody");
   if(!tbody) return;
-  const day = todayName();
-  const rows = getData(KEYS.timetable, []).filter(t => t.day === day).sort((a,b)=> SLOTS.indexOf(a.time)-SLOTS.indexOf(b.time));
-
-  $("#todayLabel") && ($("#todayLabel").textContent = day);
-
-  tbody.innerHTML = rows.length ? "" : `<tr class="empty-row"><td colspan="3">No lectures scheduled for today.</td></tr>`;
+  const day  = todayName();
+  const rows = _timetable.filter(t => t.day === day).sort((a,b)=> SLOTS.indexOf(a.time)-SLOTS.indexOf(b.time));
+  const lbl  = $("#todayLabel"); if(lbl) lbl.textContent = day;
+  tbody.innerHTML = rows.length
+    ? ""
+    : `<tr class="empty-row"><td colspan="3">No lectures scheduled for today.</td></tr>`;
   rows.forEach(t=>{
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${t.time}</td><td>${t.subject}</td><td>${t.room}</td>`;
@@ -1017,13 +1508,15 @@ function renderStudentTimetable(){
 }
 
 function searchStudentTimetable(){
-  const q = $("#studentSearch").value.trim().toLowerCase();
+  const q     = (($("#studentSearch")||{value:""}).value).trim().toLowerCase();
   const tbody = $("#studentSearchBody");
   if(!tbody) return;
-  const rows = getData(KEYS.timetable, []).filter(t =>
+  const rows = _timetable.filter(t =>
     t.subject.toLowerCase().includes(q) || t.day.toLowerCase().includes(q)
   );
-  tbody.innerHTML = rows.length ? "" : `<tr class="empty-row"><td colspan="5">No matching classes found.</td></tr>`;
+  tbody.innerHTML = rows.length
+    ? ""
+    : `<tr class="empty-row"><td colspan="5">No matching classes found.</td></tr>`;
   rows.forEach(t=>{
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${t.day}</td><td>${t.time}</td><td>${t.subject}</td><td>${t.teacher}</td><td>${t.room}</td>`;
@@ -1031,25 +1524,21 @@ function searchStudentTimetable(){
   });
 }
 
-/* ---------------- Hero mini timetable animation ---------------- */
+/* ================================================================
+   HERO MINI TIMETABLE ANIMATION
+   ================================================================ */
 
 function renderMiniTimetable(regenerate){
   const grid = $("#miniGrid");
   if(!grid) return;
-
   const shortDays = ["MON","TUE","WED","THU","FRI"];
   let html = `<div class="cell head">TIME</div>`;
   shortDays.forEach(d => html += `<div class="cell head">${d}</div>`);
-
-  const rowsCount = 4;
-  for(let r=0;r<rowsCount;r++){
+  for(let r=0;r<4;r++){
     html += `<div class="cell">P${r+1}</div>`;
-    for(let c=0;c<5;c++){
-      html += `<div class="cell" data-r="${r}" data-c="${c}">·</div>`;
-    }
+    for(let c=0;c<5;c++) html += `<div class="cell" data-r="${r}" data-c="${c}">·</div>`;
   }
   grid.innerHTML = html;
-
   const cells = $$(".cell[data-r]", grid);
   let i = 0;
   const fill = () => {
@@ -1065,7 +1554,9 @@ function renderMiniTimetable(regenerate){
   fill();
 }
 
-/* ---------------- Nav active state ---------------- */
+/* ================================================================
+   NAV ACTIVE STATE
+   ================================================================ */
 
 function markActiveNav(){
   const page = document.body.dataset.page;
@@ -1074,148 +1565,16 @@ function markActiveNav(){
   });
 }
 
-/* ---------------- Registration validation ---------------- */
+/* ================================================================
+   REGISTRATION VALIDATION (alias used by registration.html)
+   ================================================================ */
+// validateRegistration() is already defined above — no alias needed.
 
-function regHandleRoleChange(){
-  const role = $("#regRole").value;
-  const rollnoField = $("#regRollnoField");
-  if(rollnoField) rollnoField.style.display = role === "student" ? "block" : "none";
-  if(role !== "student" && rollnoField){
-    markField(rollnoField, false);
-    $("#regRollno").value = "";
-  }
-  $$(".role-pick button").forEach(b => b.classList.toggle("active", b.dataset.role === role));
-}
+/* ================================================================
+   INIT DISPATCHER
+   ================================================================ */
 
-function regSelectRole(role){
-  $("#regRole").value = role;
-  regHandleRoleChange();
-  markField($("#regRoleField"), false);
-}
-
-function validateRegistration(){
-  const roleField = $("#regRoleField");
-  const fnameField = $("#fnameField");
-  const lnameField = $("#lnameField");
-  const rollnoField = $("#regRollnoField");
-  const passField = $("#regPassField");
-  const emailField = $("#regEmailField");
-  const mobileField = $("#mobileField");
-  const addressField = $("#addressField");
-
-  const role = $("#regRole").value;
-  const fname = $("#fname").value.trim();
-  const lname = $("#lname").value.trim();
-  const rollno = $("#regRollno").value.trim();
-  const password = $("#regPassword").value;
-  const email = $("#regEmail").value.trim();
-  const mobile = $("#mobile").value.trim();
-  const address = $("#address").value.trim();
-
-  const namePattern = /^[A-Za-z]+$/;
-  const emailPattern = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
-  const mobilePattern = /^[0-9]{10}$/;
-
-  let ok = true;
-
-  // User Type: required
-  if(role === ""){
-    markField(roleField, true);
-    ok = false;
-  } else markField(roleField, false);
-
-  // First Name: alphabets only, minimum 2 characters
-  if(!namePattern.test(fname) || fname.length < 2){
-    markField(fnameField, true);
-    ok = false;
-  } else markField(fnameField, false);
-
-  // Last Name: required
-  if(lname === ""){
-    markField(lnameField, true);
-    ok = false;
-  } else markField(lnameField, false);
-
-  // Roll Number: required for students only
-  if(role === "student"){
-    if(rollno === ""){
-      markField(rollnoField, true);
-      ok = false;
-    } else markField(rollnoField, false);
-  }
-
-  // Password: minimum 6 characters
-  if(password.length < 6){
-    markField(passField, true);
-    ok = false;
-  } else markField(passField, false);
-
-  // Email: standard name@domain.com format
-  if(!emailPattern.test(email)){
-    markField(emailField, true);
-    ok = false;
-  } else markField(emailField, false);
-
-  // Mobile Number: exactly 10 digits
-  if(!mobilePattern.test(mobile)){
-    markField(mobileField, true);
-    ok = false;
-  } else markField(mobileField, false);
-
-  // Address: required
-  if(address === ""){
-    markField(addressField, true);
-    ok = false;
-  } else markField(addressField, false);
-
-  if(!ok){
-    toast("Please fix the highlighted fields.", "error");
-    return false;
-  }
-
-  // Registration succeeded — save this user into the shared registry.
-  const fullName = `${fname} ${lname}`;
-  const regUsers = getData(KEYS.registeredUsers, []);
-  // Avoid duplicate entries for same name+role
-  const alreadyExists = regUsers.some(u => u.name === fullName && u.role === role);
-  if(!alreadyExists){
-    regUsers.push({ id:uid(), name:fullName, role, rollno: role === "student" ? rollno : "" });
-    setData(KEYS.registeredUsers, regUsers);
-
-    // Auto-add to the appropriate directory so Admin can see them immediately
-    if(role === "teacher"){
-      const teachers = getData(KEYS.teachers, []);
-      teachers.push({ id:uid(), name:fullName, subject:"—", email:"—" });
-      setData(KEYS.teachers, teachers);
-    }
-    if(role === "student"){
-      const students = getData(KEYS.students, []);
-      students.push({ id:uid(), name:fullName, roll:rollno, dept:"—", sem:"1", div:"A" });
-      setData(KEYS.students, students);
-    }
-  }
-
-  // Sign the new account in and send them to their dashboard.
-  localStorage.setItem(KEYS.username, fullName);
-  localStorage.setItem(KEYS.rollno, role === "student" ? rollno : "");
-  localStorage.setItem(KEYS.role, role);
-
-  toast("🎉 Registration Successful!", "success");
-  $("#registrationForm").reset();
-
-  setTimeout(()=>{
-    if(role === "admin") window.location.href = "admin.html";
-    else if(role === "teacher") window.location.href = "teacher.html";
-    else window.location.href = "student.html";
-  }, 700);
-
-  return false;
-}
-
-/* ---------------- Init dispatcher ---------------- */
-
-document.addEventListener("DOMContentLoaded", () => {
-  seedData();
+document.addEventListener("DOMContentLoaded", async () => {
   initTheme();
   markActiveNav();
   renderUserChip();
@@ -1225,52 +1584,72 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const page = document.body.dataset.page;
 
+  /* ---------- HOME ---------- */
   if(page === "home"){
     renderMiniTimetable();
+    // Load timetable for mini-grid background (non-blocking)
+    fetchTimetable().then(data => { _timetable = data; }).catch(()=>{});
 
-    const user = getCurrentUser();
-    const bell = $("#notifBell");
-    const dot = $("#notifDot");
-    const dashBtn = $("#dashboardBtn");
+    const user   = getCurrentUser();
+    const bell   = $("#notifBell");
+    const dot    = $("#notifDot");
+    const dashBtn= $("#dashboardBtn");
 
     if(user){
-      // Show dashboard shortcut for any logged-in user
       if(dashBtn){
         dashBtn.style.display = "inline-flex";
-        const href = user.role === "admin" ? "admin.html"
-                   : user.role === "teacher" ? "teacher.html"
-                   : "student.html";
-        dashBtn.setAttribute("href", href);
+        dashBtn.setAttribute("href",
+          user.role === "admin"   ? "admin.html" :
+          user.role === "teacher" ? "teacher.html" : "student.html");
       }
-
-      // Show notification bell only for teachers (they receive timetable change alerts)
       if(bell && user.role === "teacher"){
         bell.style.display = "inline-flex";
-        const unread = getAllNotifications().filter(n => n.teacher === user.name && !n.read).length;
-        if(dot) dot.style.display = unread > 0 ? "block" : "none";
+        fetchNotifications(user.name).then(notes => {
+          _notifications = notes;
+          const unread = notes.filter(n => !n.read).length;
+          if(dot) dot.style.display = unread > 0 ? "block" : "none";
+        }).catch(()=>{});
       }
     }
   }
 
+  /* ---------- LOGIN ---------- */
   if(page === "login"){
-    // If already logged in, go straight to the right dashboard
-    const existing = getCurrentUser();
-    if(existing){
-      if(existing.role === "admin") window.location.href = "admin.html";
-      else if(existing.role === "teacher") window.location.href = "teacher.html";
-      else window.location.href = "student.html";
+    const client = sb();
+    if(client){
+      const { data:{ session } } = await client.auth.getSession().catch(() => ({ data:{ session:null } }));
+      if(session){
+        const meta = session.user.user_metadata || {};
+        const role = meta.role || localStorage.getItem(KEYS.role);
+        if(role === "admin")        window.location.href = "admin.html";
+        else if(role === "teacher") window.location.href = "teacher.html";
+        else                        window.location.href = "student.html";
+        return;
+      }
+    } else {
+      const existing = getCurrentUser();
+      if(existing){
+        if(existing.role === "admin")        window.location.href = "admin.html";
+        else if(existing.role === "teacher") window.location.href = "teacher.html";
+        else                                 window.location.href = "student.html";
+      }
     }
   }
 
+  /* ---------- REGISTER ---------- */
   if(page === "register"){
-    // nothing extra needed — form handles itself
+    // form handles itself via validateRegistration()
   }
 
+  /* ---------- ADMIN ---------- */
   if(page === "admin"){
-    const user = requireAuth(["admin"]);
-    if(user){
-      $("#adminNameDisplay") && ($("#adminNameDisplay").textContent = user.name);
-    }
+    const user = await requireAuth(["admin"]);
+    if(!user) return;
+    const nd = $("#adminNameDisplay"); if(nd) nd.textContent = user.name;
+
+    toast("Loading data…", "info");
+    await loadAllData();
+
     renderDashboardStats();
     renderStudents();
     renderTeachers();
@@ -1278,36 +1657,58 @@ document.addEventListener("DOMContentLoaded", () => {
     renderAdminTimetable();
   }
 
+  /* ---------- TEACHER ---------- */
   if(page === "teacher"){
-    const user = requireAuth(["teacher"]);
-    if(user){
-      $("#teacherNameDisplay") && ($("#teacherNameDisplay").textContent = user.name);
-      $("#profileName") && ($("#profileName").textContent = user.name);
-      renderTeacherLectures();
-      renderTeacherNotifications();
-      renderClassroomStatusReadOnly("teacherClassroomStatus");
-    }
+    const user = await requireAuth(["teacher"]);
+    if(!user) return;
+    const nd  = $("#teacherNameDisplay"); if(nd)  nd.textContent = user.name;
+    const pn  = $("#profileName");        if(pn)  pn.textContent = user.name;
+
+    await loadAllData();
+    _notifications = await fetchNotifications(user.name);
+
+    renderTeacherLectures();
+    renderTeacherNotifications();
+    renderClassroomStatusReadOnly("teacherClassroomStatus");
   }
 
+  /* ---------- STUDENT ---------- */
   if(page === "student"){
-    const user = requireAuth(["student"]);
-    if(user){
-      $("#studentNameDisplay") && ($("#studentNameDisplay").textContent = user.name);
-      $("#profileName") && ($("#profileName").textContent = user.name);
-      $("#profileRoll") && ($("#profileRoll").textContent = user.rollno || "—");
-    }
+    const user = await requireAuth(["student"]);
+    if(!user) return;
+    const nd = $("#studentNameDisplay"); if(nd) nd.textContent = user.name;
+    const pn = $("#profileName");        if(pn) pn.textContent = user.name;
+    const pr = $("#profileRoll");        if(pr) pr.textContent = user.rollno || "—";
+
+    await loadAllData();
+
     renderStudentTimetable();
     searchStudentTimetable();
     renderClassroomStatusReadOnly("studentClassroomStatus");
   }
 
+  /* ---------- TIMETABLE ---------- */
   if(page === "timetable"){
+    _timetable   = await fetchTimetable();
+    _classrooms  = await fetchClassrooms();
+    _teachers    = await fetchTeachers();
+
     const user = getCurrentUser();
-    const btn = $("#regenerateBtn");
+    const btn  = $("#regenerateBtn");
     if(btn && user && user.role === "admin"){
       btn.style.display = "inline-flex";
-      $("#editHint") && ($("#editHint").textContent = "You're signed in as admin — regenerating rebuilds everyone's schedule and notifies every teacher.");
+      const hint = $("#editHint");
+      if(hint) hint.textContent = "You're signed in as admin — regenerating rebuilds everyone's schedule and notifies every teacher.";
     }
     renderFullTimetable();
+  }
+
+  /* ---------- NOTIFICATIONS PAGE ---------- */
+  if(page === "notifications"){
+    const user = await requireAuth(["teacher"]);
+    if(!user) return;
+    _notifications = await fetchNotifications(user.name);
+    // notifications.html has its own inline renderLog() — just expose the data
+    if(typeof renderLog === "function") renderLog("all");
   }
 });
